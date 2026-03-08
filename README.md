@@ -34,7 +34,6 @@ At a high level, it provides:
 - **Local IPC bridge** via Named Pipes (Windows)
 - **Discovery beacons** on LAN
 - **Tray UX + onboarding flow** for non-console user experience
-- **Watchdog scripts** for resilient local operation
 
 This project is intended to run next to OpenClaw Gateway and be controlled by OpenClaw sessions/tools.
 
@@ -243,7 +242,7 @@ dotnet run -p:Platform=x64 -- --gateway-url ws://{gateway_ip}:18789 --gateway-to
 
 1. Ensure gateway is running and reachable on the configured `gateway.host` IP/name (default is `127.0.0.1`).
 2. Ensure token is available via CLI/env/config.
-3. Start node (or watchdog).
+3. Start node.
 4. Confirm node appears connected in OpenClaw node status.
 5. Approve pairing requests if required by your gateway policy.
 
@@ -277,12 +276,6 @@ dotnet run -p:Platform=x64
 dotnet run -p:Platform=x64 -- --no-tray
 ```
 
-### Example D — watchdog-managed runtime (PowerShell)
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-watchdog.ps1
-```
-
 ---
 
 ## 8) Project structure and architecture
@@ -292,10 +285,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-watchdog.ps1
 ```text
 src/
 ├── OpenClaw.sln
-├── scripts/
-│   ├── node-watchdog.ps1
-│   ├── node-reload.ps1
-│   └── node-watchdog-install-task.ps1
 ├── OpenClaw.Node/
 │   ├── Program.cs
 │   ├── OpenClaw.Node.csproj
@@ -357,7 +346,7 @@ src/
 ### No tray icon visible
 
 - Ensure Windows target build exists (`net8.0-windows`)
-- Rebuild and restart watchdog/node
+- Rebuild and restart node
 
 ### “Authentication failed” dialog
 
@@ -371,13 +360,6 @@ src/
 - Check Windows camera privacy permissions
 - verify camera device exists (`camera.list`)
 - optionally verify ffmpeg availability if fallback expected
-
-### Watchdog keeps relaunching
-
-- inspect:
-  - `node-watchdog-child.log`
-  - `node-watchdog-child.err.log`
-- check token/config path resolution
 
 ### Gateway unreachable
 
