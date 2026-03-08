@@ -2,7 +2,7 @@
 
 A Windows-native companion node for OpenClaw Gateway.
 
-It connects to your local OpenClaw gateway, exposes system/media/automation commands, supports tray-first operation (with onboarding UX), and provides watchdog scripts for reliable day-to-day running.
+It connects to your local OpenClaw gateway, exposes system/media/automation commands, supports tray-first operation (with onboarding UX).
 
 ---
 
@@ -15,18 +15,17 @@ It connects to your local OpenClaw gateway, exposes system/media/automation comm
 - [5) Build and run](#5-build-and-run)
 - [6) Initial setup and pairing](#6-initial-setup-and-pairing)
 - [7) Usage examples](#7-usage-examples)
-- [8) Scripts and operational workflow](#8-scripts-and-operational-workflow)
-- [9) Project structure and architecture](#9-project-structure-and-architecture)
-- [10) Troubleshooting](#10-troubleshooting)
-- [11) Security and privacy notes](#11-security-and-privacy-notes)
-- [12) Testing](#12-testing)
-- [13) Known limitations](#13-known-limitations)
+- [8) Project structure and architecture](#8-project-structure-and-architecture)
+- [9) Troubleshooting](#9-troubleshooting)
+- [10) Security and privacy notes](#10-security-and-privacy-notes)
+- [11) Testing](#11-testing)
+- [12) Known limitations](#12-known-limitations)
 
 ---
 
 ## 1) What this project is
 
-`apps/windows` contains the Windows port of the OpenClaw node runtime.
+Contains the Windows port of the OpenClaw node runtime.
 
 At a high level, it provides:
 
@@ -213,10 +212,10 @@ If token/config are missing/invalid in tray mode, app stays alive and guides rec
 
 ## 5) Build and run
 
-From `apps/windows`:
+From `src`:
 
 ```bash
-cd <repo-root>/apps/windows
+cd <repo-root>/src
 dotnet build OpenClaw.Node/OpenClaw.Node.csproj -p:Platform=x64
 ```
 
@@ -228,8 +227,8 @@ dotnet build OpenClaw.Node/OpenClaw.Node.csproj -p:Platform=x64
 ### Run (direct)
 
 ```bash
-cd <repo-root>/apps/windows/OpenClaw.Node
-dotnet run -p:Platform=x64 -- --gateway-url ws://192.168.1.50:18789 --gateway-token <TOKEN>
+cd <repo-root>/src/OpenClaw.Node
+dotnet run -p:Platform=x64 -- --gateway-url ws://{gateway_ip}:18789 --gateway-token <TOKEN>
 ```
 
 ### Tray/headless behavior
@@ -261,7 +260,7 @@ dotnet run -p:Platform=x64 -- --gateway-url ws://192.168.1.50:18789 --gateway-to
 ### Example A — run node with explicit token
 
 ```bash
-dotnet run -p:Platform=x64 -- --gateway-url ws://192.168.1.50:18789 --gateway-token <TOKEN>
+dotnet run -p:Platform=x64 -- --gateway-url ws://{gateway_ip}:18789 --gateway-token <TOKEN>
 ```
 
 ### Example B — run with config fallback only
@@ -286,49 +285,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-watchdog.ps1
 
 ---
 
-## 8) Scripts and operational workflow
-
-Located in `apps/windows/scripts/`.
-
-### `node-watchdog.ps1`
-
-Long-running supervisor that:
-
-- starts node if it is not running
-- can pause via `.node-watchdog.pause`
-- writes child logs:
-  - `node-watchdog-child.log`
-  - `node-watchdog-child.err.log`
-- prefers tray build (`net8.0-windows`) when available and tray enabled
-
-### `node-reload.ps1`
-
-Developer reload helper that:
-
-- pauses watchdog
-- stops node
-- optionally pulls latest branch
-- optionally rebuilds
-- unpauses watchdog
-- verifies process is running
-
-### `node-watchdog-install-task.ps1`
-
-Installs/updates a Scheduled Task (`OpenClawNodeWatchdog`) for logon startup.
-
----
-
-## 9) Project structure and architecture
+## 8) Project structure and architecture
 
 ## Folder map
 
 ```text
-apps/windows/
+src/
 ├── OpenClaw.sln
-├── README.md
-├── PLAN.md
-├── HANDOFF.md
-├── RELEASE_NOTES.md
 ├── scripts/
 │   ├── node-watchdog.ps1
 │   ├── node-reload.ps1
@@ -384,7 +347,7 @@ apps/windows/
 
 ---
 
-## 10) Troubleshooting
+## 9) Troubleshooting
 
 ### App exits immediately
 
@@ -424,7 +387,7 @@ apps/windows/
 
 ---
 
-## 11) Security and privacy notes
+## 10) Security and privacy notes
 
 - Do **not** commit real tokens, keys, PATs, or personal local paths.
 - Keep secrets in local env/config (ignored from source control).
@@ -433,34 +396,28 @@ apps/windows/
 
 ---
 
-## 12) Testing
+## 11) Testing
 
 Run all tests:
 
 ```bash
-cd <repo-root>/apps/windows
+cd <repo-root>/src
 dotnet test OpenClaw.Node.Tests/OpenClaw.Node.Tests.csproj -p:Platform=x64
 ```
 
 Run real-gateway integration subset (opt-in):
 
 ```bash
-cd <repo-root>/apps/windows
+cd <repo-root>/src
 RUN_REAL_GATEWAY_INTEGRATION=1 dotnet test OpenClaw.Node.Tests/OpenClaw.Node.Tests.csproj -p:Platform=x64 --filter "FullyQualifiedName~RealGatewayIntegrationTests"
 ```
 
 ---
 
-## 13) Known limitations
+## 12) Known limitations
 
 - Some automation/media behavior is host and permission dependent.
 - `net8.0-windows` target is intended for Windows hosts (tray/UI path).
 - Discovery currently uses in-memory index (no persisted discovery DB).
 
 ---
-
-If you are maintaining this project, also read:
-
-- `PLAN.md` (implementation roadmap and completion state)
-- `HANDOFF.md` (current state and operational notes)
-- `RELEASE_NOTES.md` (historical milestones)
