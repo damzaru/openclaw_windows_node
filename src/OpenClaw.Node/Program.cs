@@ -16,7 +16,7 @@ namespace OpenClaw.Node
         static async Task Main(string[] args)
         {
             var startedAtUtc = DateTimeOffset.UtcNow;
-            Console.WriteLine("OpenClaw Node for Windows starting...");
+            Console.WriteLine($"OpenClaw Node for Windows starting... build={BuildInfo.BuildVersion}");
 
             var configPath = GetOpenClawConfigPath();
             var forceTray = HasArg(args, "--tray");
@@ -46,15 +46,15 @@ namespace OpenClaw.Node
                     { "displayName", Environment.MachineName },
                     { "platform", "windows" },
                     { "mode", "node" },
-                    { "version", "dev" },
+                    { "version", $"dev+{BuildInfo.BuildVersion}" },
                     { "instanceId", Guid.NewGuid().ToString() },
                     { "deviceFamily", "Windows" }
                 },
-                Caps = new List<string> { "screenRecording", "notifications", "microphone" },
+                Caps = new List<string> { "screenRecording", "notifications", "microphone", "browser" },
                 Locale = "en-US",
                 UserAgent = Environment.OSVersion.VersionString,
                 Scopes = new List<string>(),
-                Commands = new List<string> { "system.run", "system.which", "system.notify", "screen.capture", "screen.list", "screen.record", "camera.list", "camera.snap", "window.list", "window.focus", "window.rect", "input.type", "input.key", "input.click", "input.scroll", "input.click.relative", "ui.find", "ui.click", "ui.type" },
+                Commands = new List<string> { "system.run", "system.which", "system.notify", "system.describe", "browser.proxy", "screen.capture", "screen.list", "screen.record", "camera.list", "camera.snap", "window.list", "window.focus", "window.rect", "input.type", "input.key", "input.click", "input.scroll", "input.click.relative", "ui.find", "ui.click", "ui.type" },
                 Permissions = new Dictionary<string, object>()
             };
 
@@ -64,9 +64,10 @@ namespace OpenClaw.Node
             var core = new CoreMethodService(startedAtUtc);
             using var ipc = new IpcPipeServerService(version: "dev", authToken: token);
             using var connection = new GatewayConnection(url, token, connectParams);
-            var executor = new NodeCommandExecutor(connection);
+            var browserProxy = new BrowserProxyService();
+            var executor = new NodeCommandExecutor(connection, browserProxyService: browserProxy);
             using var discovery = new DiscoveryService(connectParams, url);
-            var trayStatus = new TrayStatusBroadcaster();
+            var trayStatus = new TrayStatusBroadcaster(buildVersion: BuildInfo.BuildVersion);
             var reconnectStartedAtUtc = (DateTimeOffset?)null;
             long? lastReconnectMs = null;
             var authDialogShown = false;
@@ -395,7 +396,8 @@ namespace OpenClaw.Node
                 $"onboarding: {snapshot.OnboardingStatus}",
                 $"lastReconnect: {reconnectText}",
                 $"uptimeSeconds: {uptime}",
-                $"pid: {Environment.ProcessId}"
+                $"pid: {Environment.ProcessId}",
+                $"buildVersion: {BuildInfo.BuildVersion}"
             });
         }
 
