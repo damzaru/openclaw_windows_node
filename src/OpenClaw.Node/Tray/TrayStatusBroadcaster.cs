@@ -5,11 +5,13 @@ namespace OpenClaw.Node.Tray
     public sealed class TrayStatusBroadcaster
     {
         private readonly Func<DateTimeOffset> _clock;
+        private readonly string _buildVersion;
 
-        public TrayStatusBroadcaster(Func<DateTimeOffset>? clock = null)
+        public TrayStatusBroadcaster(Func<DateTimeOffset>? clock = null, string buildVersion = "unknown")
         {
             _clock = clock ?? (() => DateTimeOffset.UtcNow);
-            Current = new TrayStatusSnapshot(NodeRuntimeState.Starting, "Starting", _clock(), OnboardingStatus: "Onboarding: Ready");
+            _buildVersion = string.IsNullOrWhiteSpace(buildVersion) ? "unknown" : buildVersion;
+            Current = new TrayStatusSnapshot(NodeRuntimeState.Starting, "Starting", _clock(), OnboardingStatus: "Onboarding: Ready", BuildVersion: _buildVersion);
         }
 
         public TrayStatusSnapshot Current { get; private set; }
@@ -20,7 +22,7 @@ namespace OpenClaw.Node.Tray
         {
             if (string.IsNullOrWhiteSpace(message)) message = state.ToString();
             if (string.IsNullOrWhiteSpace(onboardingStatus)) onboardingStatus = "Onboarding: Ready";
-            Current = new TrayStatusSnapshot(state, message, _clock(), pendingPairs, lastReconnectMs, onboardingStatus);
+            Current = new TrayStatusSnapshot(state, message, _clock(), pendingPairs, lastReconnectMs, onboardingStatus, _buildVersion);
             OnStatusChanged?.Invoke(Current);
         }
     }

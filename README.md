@@ -66,6 +66,8 @@ This project is intended to run next to OpenClaw Gateway and be controlled by Op
   - `system.run`
   - `system.which`
   - `system.notify`
+- Browser:
+  - `browser.proxy` (node-owned existing-session / DevTools MCP backend)
 - Screen/camera:
   - `screen.list`
   - `screen.capture`
@@ -168,6 +170,7 @@ Use Gateway-side command policy to explicitly allow only the node commands you w
         "system.notify",
         "system.which",
         "system.run",
+        "browser.proxy",
         "screen.capture",
         "screen.list",
         "screen.record",

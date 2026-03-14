@@ -28,6 +28,7 @@ namespace OpenClaw.Node.Tray
         private object? _pairsItem;
         private object? _reconnectItem;
         private object? _onboardingItem;
+        private object? _buildItem;
 
         public WindowsNotifyIconTrayHost(Action<string>? log = null, Action? onOpenLogs = null, Action? onOpenConfig = null, Action? onRestart = null, Action? onExit = null, Action? onCopyDiagnostics = null)
         {
@@ -82,6 +83,10 @@ namespace OpenClaw.Node.Tray
                     if (_onboardingItem != null)
                     {
                         SetProperty(_onboardingItem, "Text", snapshot.OnboardingStatus);
+                    }
+                    if (_buildItem != null)
+                    {
+                        SetProperty(_buildItem, "Text", $"Build: {snapshot.BuildVersion}");
                     }
                 }
                 catch (Exception ex)
@@ -166,10 +171,13 @@ namespace OpenClaw.Node.Tray
                     ?? throw new InvalidOperationException("Unable to create Reconnect item");
                 _onboardingItem = Activator.CreateInstance(menuItemType, "Onboarding: Ready")
                     ?? throw new InvalidOperationException("Unable to create Onboarding item");
+                _buildItem = Activator.CreateInstance(menuItemType, "Build: unknown")
+                    ?? throw new InvalidOperationException("Unable to create Build item");
                 SetProperty(_stateItem, "Enabled", false);
                 SetProperty(_pairsItem, "Enabled", false);
                 SetProperty(_reconnectItem, "Enabled", false);
                 SetProperty(_onboardingItem, "Enabled", false);
+                SetProperty(_buildItem, "Enabled", false);
 
                 var openLogsItem = Activator.CreateInstance(menuItemType, "Open Logs")
                     ?? throw new InvalidOperationException("Unable to create Open Logs item");
@@ -212,6 +220,7 @@ namespace OpenClaw.Node.Tray
                 AddMenuItem(menu, _pairsItem);
                 AddMenuItem(menu, _reconnectItem);
                 AddMenuItem(menu, _onboardingItem);
+                AddMenuItem(menu, _buildItem);
                 if (separatorType != null && Activator.CreateInstance(separatorType) is object separator1) AddMenuItem(menu, separator1);
                 AddMenuItem(menu, openLogsItem);
                 AddMenuItem(menu, openConfigItem);

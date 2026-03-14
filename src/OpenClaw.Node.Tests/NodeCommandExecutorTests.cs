@@ -706,6 +706,70 @@ namespace OpenClaw.Node.Tests
         }
 
         [Fact]
+        public async Task SystemDescribe_ShouldReportBundledBrowserRuntimeShape()
+        {
+            var executor = new NodeCommandExecutor();
+            var req = new BridgeInvokeRequest
+            {
+                Id = "describe-1",
+                Command = "system.describe"
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.True(res.Ok);
+            Assert.NotNull(res.PayloadJSON);
+
+            using var doc = JsonDocument.Parse(res.PayloadJSON!);
+            var root = doc.RootElement;
+            var runtimeBrowser = root.GetProperty("runtime").GetProperty("browser");
+            Assert.Equal("managed-or-existing-bundled", runtimeBrowser.GetProperty("backendMode").GetString());
+            Assert.True(runtimeBrowser.TryGetProperty("bundledRuntime", out var bundledRuntime));
+            Assert.True(bundledRuntime.TryGetProperty("available", out _));
+        }
+
+        [Fact]
+        public async Task BrowserProxy_ShouldReturnPayload_FromInjectedService()
+        {
+            var browser = new FakeBrowserProxyService("{\"result\":{\"ok\":true,\"profiles\":[\"chrome-relay\"]}} ");
+            var executor = new NodeCommandExecutor(browserProxyService: browser);
+            var req = new BridgeInvokeRequest
+            {
+                Id = "browser-1",
+                Command = "browser.proxy",
+                ParamsJSON = JsonSerializer.Serialize(new { path = "/profiles", method = "GET", timeoutMs = 1234 })
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.True(res.Ok);
+            Assert.NotNull(res.PayloadJSON);
+            Assert.NotNull(browser.LastRequest);
+            Assert.Equal("/profiles", browser.LastRequest!.Path);
+            Assert.Equal("GET", browser.LastRequest.Method);
+            Assert.Equal(1234, browser.LastRequest.TimeoutMs);
+        }
+
+        [Fact]
+        public async Task BrowserProxy_ShouldValidatePath()
+        {
+            var executor = new NodeCommandExecutor(browserProxyService: new FakeBrowserProxyService("{\"result\":{}}"));
+            var req = new BridgeInvokeRequest
+            {
+                Id = "browser-2",
+                Command = "browser.proxy",
+                ParamsJSON = JsonSerializer.Serialize(new { method = "GET" })
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.False(res.Ok);
+            Assert.NotNull(res.Error);
+            Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error!.Code);
+            Assert.Contains("params.path", res.Error.Message);
+        }
+
+        [Fact]
         public async Task UnknownCommand_ShouldReturnInvalidRequest()
         {
             var executor = new NodeCommandExecutor();
@@ -716,6 +780,24 @@ namespace OpenClaw.Node.Tests
             Assert.False(res.Ok);
             Assert.NotNull(res.Error);
             Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error!.Code);
+        }
+
+        private sealed class FakeBrowserProxyService : IBrowserProxyService
+        {
+            private readonly string _payload;
+
+            public FakeBrowserProxyService(string payload)
+            {
+                _payload = payload;
+            }
+
+            public BrowserProxyRequest? LastRequest { get; private set; }
+
+            public Task<string> ProxyAsync(BrowserProxyRequest request, System.Threading.CancellationToken cancellationToken = default)
+            {
+                LastRequest = request;
+                return Task.FromResult(_payload);
+            }
         }
     }
 }

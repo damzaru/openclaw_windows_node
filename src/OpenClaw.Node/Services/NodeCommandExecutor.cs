@@ -22,11 +22,16 @@ namespace OpenClaw.Node.Services
 
         private readonly IGatewayRpcClient? _rpc;
         private readonly IScreenImageProvider _screen;
+        private readonly IBrowserProxyService? _browserProxy;
 
-        public NodeCommandExecutor(IGatewayRpcClient? rpc = null, IScreenImageProvider? screen = null)
+        public NodeCommandExecutor(
+            IGatewayRpcClient? rpc = null,
+            IScreenImageProvider? screen = null,
+            IBrowserProxyService? browserProxyService = null)
         {
             _rpc = rpc;
             _screen = screen ?? new ScreenCaptureService();
+            _browserProxy = browserProxyService;
         }
 
         public async Task<BridgeInvokeResponse> ExecuteAsync(BridgeInvokeRequest request)
@@ -38,6 +43,8 @@ namespace OpenClaw.Node.Services
                     "system.notify" => HandleSystemNotify(request),
                     "system.which" => await HandleSystemWhichAsync(request),
                     "system.run" => await HandleSystemRunAsync(request),
+                    "system.describe" => HandleSystemDescribe(request),
+                    "browser.proxy" => await HandleBrowserProxyAsync(request),
                     "screen.capture" => await HandleScreenCaptureAsync(request),
                     "screen.list" => await HandleScreenListAsync(request),
                     "screen.record" => await HandleScreenRecordAsync(request),
@@ -241,6 +248,90 @@ namespace OpenClaw.Node.Services
                             ? $"system.run timed out after {timeoutMs ?? 0}ms"
                             : $"system.run failed with exit code {result.ExitCode}"
                     }
+            };
+        }
+
+        private BridgeInvokeResponse HandleSystemDescribe(BridgeInvokeRequest request)
+        {
+            var manifest = CapabilityManifestService.Build();
+            return new BridgeInvokeResponse
+            {
+                Id = request.Id,
+                Ok = true,
+                PayloadJSON = ToJson(manifest),
+            };
+        }
+
+        private async Task<BridgeInvokeResponse> HandleBrowserProxyAsync(BridgeInvokeRequest request)
+        {
+            if (_browserProxy == null)
+            {
+                return new BridgeInvokeResponse
+                {
+                    Id = request.Id,
+                    Ok = false,
+                    Error = new OpenClawNodeError
+                    {
+                        Code = OpenClawNodeErrorCode.Unavailable,
+                        Message = "browser.proxy is not configured on this node"
+                    }
+                };
+            }
+
+            var root = ParseParams(request.ParamsJSON);
+            if (root == null)
+            {
+                return Invalid(request.Id, "browser.proxy requires params");
+            }
+
+            if (!root.Value.TryGetProperty("path", out var pathEl) || pathEl.ValueKind != JsonValueKind.String)
+            {
+                return Invalid(request.Id, "browser.proxy requires params.path");
+            }
+
+            if (root.Value.TryGetProperty("method", out var methodEl) && methodEl.ValueKind != JsonValueKind.String)
+            {
+                return Invalid(request.Id, "browser.proxy params.method must be a string");
+            }
+
+            if (root.Value.TryGetProperty("profile", out var profileEl) && profileEl.ValueKind != JsonValueKind.String)
+            {
+                return Invalid(request.Id, "browser.proxy params.profile must be a string");
+            }
+
+            if (root.Value.TryGetProperty("timeoutMs", out var timeoutEl))
+            {
+                if (timeoutEl.ValueKind != JsonValueKind.Number || !timeoutEl.TryGetInt32(out var parsedTimeout))
+                {
+                    return Invalid(request.Id, "browser.proxy params.timeoutMs must be a 32-bit integer");
+                }
+                if (parsedTimeout <= 0)
+                {
+                    return Invalid(request.Id, "browser.proxy params.timeoutMs must be > 0");
+                }
+            }
+
+            if (root.Value.TryGetProperty("query", out var queryEl) && queryEl.ValueKind != JsonValueKind.Object)
+            {
+                return Invalid(request.Id, "browser.proxy params.query must be an object");
+            }
+
+            var proxyRequest = new BrowserProxyRequest
+            {
+                Method = root.Value.TryGetProperty("method", out methodEl) ? (methodEl.GetString() ?? "GET") : "GET",
+                Path = pathEl.GetString() ?? "/",
+                Profile = root.Value.TryGetProperty("profile", out profileEl) ? profileEl.GetString() : null,
+                TimeoutMs = root.Value.TryGetProperty("timeoutMs", out timeoutEl) && timeoutEl.TryGetInt32(out var parsed) ? parsed : 20000,
+                Query = ReadQuery(root.Value),
+                Body = root.Value.TryGetProperty("body", out var bodyEl) ? bodyEl.Clone() : null,
+            };
+
+            var payloadJson = await _browserProxy.ProxyAsync(proxyRequest);
+            return new BridgeInvokeResponse
+            {
+                Id = request.Id,
+                Ok = true,
+                PayloadJSON = payloadJson,
             };
         }
 
@@ -1919,6 +2010,32 @@ namespace OpenClaw.Node.Services
                 Message = message
             }
         };
+
+        private static Dictionary<string, string>? ReadQuery(JsonElement root)
+        {
+            if (!root.TryGetProperty("query", out var queryEl) || queryEl.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in queryEl.EnumerateObject())
+            {
+                switch (prop.Value.ValueKind)
+                {
+                    case JsonValueKind.String:
+                        dict[prop.Name] = prop.Value.GetString() ?? string.Empty;
+                        break;
+                    case JsonValueKind.Number:
+                    case JsonValueKind.True:
+                    case JsonValueKind.False:
+                        dict[prop.Name] = prop.Value.ToString();
+                        break;
+                }
+            }
+
+            return dict.Count == 0 ? null : dict;
+        }
 
         private static JsonElement? ParseParams(string? paramsJson)
         {

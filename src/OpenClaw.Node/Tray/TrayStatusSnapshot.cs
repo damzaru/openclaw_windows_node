@@ -8,5 +8,6 @@ namespace OpenClaw.Node.Tray
         DateTimeOffset UpdatedAtUtc,
         int PendingPairs = 0,
         long? LastReconnectMs = null,
-        string OnboardingStatus = "Onboarding: Ready");
+        string OnboardingStatus = "Onboarding: Ready",
+        string BuildVersion = "unknown");
 }
