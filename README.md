@@ -12,14 +12,15 @@ It connects to your local OpenClaw gateway, exposes system/media/automation comm
 - [2) Feature list](#2-feature-list)
 - [3) Requirements](#3-requirements)
 - [4) Configuration (Gateway + Node)](#4-configuration-gateway--node)
-- [5) Build and run](#5-build-and-run)
-- [6) Initial setup and pairing](#6-initial-setup-and-pairing)
-- [7) Usage examples](#7-usage-examples)
-- [8) Project structure and architecture](#8-project-structure-and-architecture)
-- [9) Troubleshooting](#9-troubleshooting)
-- [10) Security and privacy notes](#10-security-and-privacy-notes)
-- [11) Testing](#11-testing)
-- [12) Known limitations](#12-known-limitations)
+- [5) Build, version, reload, and deploy](#5-build-version-reload-and-deploy)
+- [6) Browser runtime and remote browser behavior](#6-browser-runtime-and-remote-browser-behavior)
+- [7) Initial setup and pairing](#7-initial-setup-and-pairing)
+- [8) Usage examples](#8-usage-examples)
+- [9) Project structure and architecture](#9-project-structure-and-architecture)
+- [10) Troubleshooting](#10-troubleshooting)
+- [11) Security and privacy notes](#11-security-and-privacy-notes)
+- [12) Testing](#12-testing)
+- [13) Known limitations](#13-known-limitations)
 
 ---
 
@@ -67,7 +68,8 @@ This project is intended to run next to OpenClaw Gateway and be controlled by Op
   - `system.which`
   - `system.notify`
 - Browser:
-  - `browser.proxy` (node-owned existing-session / DevTools MCP backend)
+  - `browser.proxy` (node-owned bundled DevTools MCP backend)
+  - Chrome-first managed browser launch with reuse of an already-running DevTools session when present
 - Screen/camera:
   - `screen.list`
   - `screen.capture`
@@ -212,13 +214,55 @@ If token/config are missing/invalid in tray mode, app stays alive and guides rec
 
 ---
 
-## 5) Build and run
+## 5) Build, version, reload, and deploy
 
-From `src`:
+### Canonical workflow
+
+Use the scripts in `scripts/` instead of inventing ad-hoc build/deploy flows.
+
+Recommended sequence for runtime-visible node changes:
+
+1. bump the runtime-visible build label
+2. inspect local preflight state
+3. rebuild/reload the canonical Windows output
+4. deploy that canonical output to ROG17 only if needed
+
+### Runtime-visible build label
+
+The tray and several runtime surfaces use:
+
+- `src/OpenClaw.Node/BuildInfo.cs`
+
+Specifically:
+
+- `BuildInfo.BuildVersion` (for example `b0029`)
+
+That build label is the first thing to bump when you want an easy runtime verification point.
+
+### Canonical scripts
+
+#### Bump build label
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bump-build.ps1 -RepoPath .
+```
+
+#### Preflight local state
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-preflight.ps1 -RepoPath .
+```
+
+#### Reload local Windows node from canonical output
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-reload.ps1 -RepoPath . -NoPull
+```
+
+#### Deploy canonical build to ROG17 from WSL/bash
 
 ```bash
-cd <repo-root>/src
-dotnet build OpenClaw.Node/OpenClaw.Node.csproj -p:Platform=x64
+./scripts/deploy-rog17-node.sh
 ```
 
 ### Build targets
@@ -226,11 +270,30 @@ dotnet build OpenClaw.Node/OpenClaw.Node.csproj -p:Platform=x64
 - `net8.0` (cross-platform/dev target)
 - `net8.0-windows` (Windows Forms tray target; built on Windows, `WinExe` output so no console window)
 
+### Canonical build output
+
+The canonical Windows build output is:
+
+```text
+src/OpenClaw.Node/bin/x64/Debug/net8.0-windows/
+```
+
+Do not silently switch to alternate output folders. If the canonical path is blocked/locked, stop and choose the next step deliberately.
+
+### Direct build (when needed)
+
+From `src`:
+
+```bash
+cd <repo-root>/src
+dotnet build OpenClaw.Node/OpenClaw.Node.csproj -p:Platform=x64 -f net8.0-windows
+```
+
 ### Run (direct)
 
 ```bash
 cd <repo-root>/src/OpenClaw.Node
-dotnet run -p:Platform=x64 -- --gateway-url ws://{gateway_ip}:18789 --gateway-token <TOKEN>
+dotnet run -p:Platform=x64 -f net8.0-windows -- --gateway-url ws://{gateway_ip}:18789 --gateway-token <TOKEN>
 ```
 
 ### Tray/headless behavior
@@ -241,7 +304,74 @@ dotnet run -p:Platform=x64 -- --gateway-url ws://{gateway_ip}:18789 --gateway-to
 
 ---
 
-## 6) Initial setup and pairing
+## 6) Browser runtime and remote browser behavior
+
+### Browser backend model
+
+The Windows node owns browser automation through:
+
+- `browser.proxy`
+- a **bundled** `chrome-devtools-mcp` backend
+- a **bundled** Node runtime
+
+The target machine should not need system `node`, `npm`, or `npx` for browser support.
+
+### Bundled browser runtime
+
+Bundled browser runtime files live under:
+
+```text
+src/OpenClaw.Node/browser-runtime/
+```
+
+They are copied into the built/published node output under:
+
+```text
+runtimes/browser/
+```
+
+Current packaged pieces include:
+
+- bundled `node.exe`
+- bundled `chrome-devtools-mcp`
+- `versions.json` for pinned runtime metadata
+
+Refresh the bundle with:
+
+```bash
+./scripts/vendor-browser-runtime.sh
+```
+
+### Browser launch behavior
+
+Current intent/behavior:
+
+1. probe `http://127.0.0.1:9222/json/version`
+2. if a valid DevTools endpoint already exists, attach to it
+3. otherwise discover a supported local browser
+4. launch a managed browser profile with remote debugging enabled
+5. serve browser actions through the bundled MCP backend
+
+### Browser preference
+
+Current discovery order is Chrome-first:
+
+1. Google Chrome
+2. Microsoft Edge
+
+The validated target behavior is:
+
+- prefer **Chrome** when launching a new managed browser session from a clean state
+- reuse an already-running valid DevTools session when available
+
+### Notes
+
+- Chromium-compatible browsers can expose the same DevTools Protocol, but product intent here is Chrome-first.
+- Fixed-port assumptions around `9222` require validation against a **real** DevTools endpoint, not just “something is listening”.
+
+---
+
+## 7) Initial setup and pairing
 
 1. Ensure gateway is running and reachable on the configured `gateway.host` IP/name (default is `127.0.0.1`).
 2. Ensure token is available via CLI/env/config.
@@ -257,7 +387,7 @@ dotnet run -p:Platform=x64 -- --gateway-url ws://{gateway_ip}:18789 --gateway-to
 
 ---
 
-## 7) Usage examples
+## 8) Usage examples
 
 ### Example A — run node with explicit token
 
@@ -281,7 +411,7 @@ dotnet run -p:Platform=x64 -- --no-tray
 
 ---
 
-## 8) Project structure and architecture
+## 9) Project structure and architecture
 
 ## Folder map
 
@@ -339,7 +469,7 @@ src/
 
 ---
 
-## 9) Troubleshooting
+## 10) Troubleshooting
 
 ### App exits immediately
 
@@ -372,7 +502,7 @@ src/
 
 ---
 
-## 10) Security and privacy notes
+## 11) Security and privacy notes
 
 - Do **not** commit real tokens, keys, PATs, or personal local paths.
 - Keep secrets in local env/config (ignored from source control).
@@ -381,7 +511,7 @@ src/
 
 ---
 
-## 11) Testing
+## 12) Testing
 
 Run all tests:
 
@@ -399,7 +529,7 @@ RUN_REAL_GATEWAY_INTEGRATION=1 dotnet test OpenClaw.Node.Tests/OpenClaw.Node.Tes
 
 ---
 
-## 12) Known limitations
+## 13) Known limitations
 
 - Some automation/media behavior is host and permission dependent.
 - `net8.0-windows` target is intended for Windows hosts (tray/UI path).
