@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -42,6 +43,7 @@ namespace OpenClaw.Node.Services
                 {
                     "system.notify" => HandleSystemNotify(request),
                     "system.which" => await HandleSystemWhichAsync(request),
+                    "system.run.prepare" => HandleSystemRunPrepare(request),
                     "system.run" => await HandleSystemRunAsync(request),
                     "system.describe" => HandleSystemDescribe(request),
                     "browser.proxy" => await HandleBrowserProxyAsync(request),
@@ -106,8 +108,8 @@ namespace OpenClaw.Node.Services
         private async Task<BridgeInvokeResponse> HandleSystemWhichAsync(BridgeInvokeRequest request)
         {
             var root = ParseParams(request.ParamsJSON);
-            var command = root?.TryGetProperty("command", out var c) == true ? c.GetString() : null;
-            if (string.IsNullOrWhiteSpace(command))
+            var bins = ResolveSystemWhichBins(root);
+            if (bins == null || bins.Length == 0)
             {
                 return new BridgeInvokeResponse
                 {
@@ -116,36 +118,85 @@ namespace OpenClaw.Node.Services
                     Error = new OpenClawNodeError
                     {
                         Code = OpenClawNodeErrorCode.InvalidRequest,
-                        Message = "system.which requires params.command"
+                        Message = "system.which requires params.bins (or legacy params.command)"
                     }
                 };
             }
 
             var whichProgram = OperatingSystem.IsWindows() ? "where" : "which";
-            var result = await RunProcessAsync(whichProgram, command);
+            var resolved = new System.Collections.Generic.List<object>();
+            var missing = new System.Collections.Generic.List<string>();
+
+            foreach (var bin in bins)
+            {
+                var result = await RunProcessAsync(whichProgram, new[] { bin });
+                var path = FirstNonEmptyLine(result.StdOut);
+                var found = result.ExitCode == 0 && !string.IsNullOrWhiteSpace(path);
+                if (found)
+                {
+                    resolved.Add(new { name = bin, resolvedPath = path! });
+                }
+                else
+                {
+                    missing.Add(bin);
+                }
+            }
 
             var payload = new
             {
-                ok = result.ExitCode == 0,
-                found = result.ExitCode == 0,
-                path = result.StdOut.Trim(),
-                stderr = result.StdErr.Trim(),
+                bins = resolved,
+                missing,
             };
 
             return new BridgeInvokeResponse
             {
                 Id = request.Id,
-                Ok = result.ExitCode == 0,
-                PayloadJSON = ToJson(payload),
-                Error = result.ExitCode == 0
-                    ? null
-                    : new OpenClawNodeError
+                Ok = true,
+                PayloadJSON = ToJson(payload)
+            };
+        }
+
+        private BridgeInvokeResponse HandleSystemRunPrepare(BridgeInvokeRequest request)
+        {
+            var root = ParseParams(request.ParamsJSON);
+            if (root == null)
+            {
+                return Invalid(request.Id, "system.run.prepare requires params");
+            }
+
+            if (!TryResolveSystemRunCommand(root.Value, request.Id, out var fileName, out var args, out var commandText, out _, out var invalid))
+            {
+                return invalid!;
+            }
+
+            var cwd = root.Value.TryGetProperty("cwd", out var cwdEl) && cwdEl.ValueKind == JsonValueKind.String
+                ? NormalizeNullableString(cwdEl.GetString())
+                : null;
+            var agentId = root.Value.TryGetProperty("agentId", out var agentIdEl) && agentIdEl.ValueKind == JsonValueKind.String
+                ? NormalizeNullableString(agentIdEl.GetString())
+                : null;
+            var sessionKey = root.Value.TryGetProperty("sessionKey", out var sessionKeyEl) && sessionKeyEl.ValueKind == JsonValueKind.String
+                ? NormalizeNullableString(sessionKeyEl.GetString())
+                : null;
+
+            var argv = new[] { fileName! }.Concat(args!).ToArray();
+            return new BridgeInvokeResponse
+            {
+                Id = request.Id,
+                Ok = true,
+                PayloadJSON = ToJson(new
+                {
+                    plan = new
                     {
-                        Code = OpenClawNodeErrorCode.Unavailable,
-                        Message = string.IsNullOrWhiteSpace(result.StdErr)
-                            ? $"command not found: {command}"
-                            : result.StdErr.Trim()
+                        argv,
+                        cwd,
+                        commandText,
+                        commandPreview = (string?)null,
+                        agentId,
+                        sessionKey,
+                        mutableFileOperand = (object?)null,
                     }
+                })
             };
         }
 
@@ -155,6 +206,11 @@ namespace OpenClaw.Node.Services
             if (root == null)
             {
                 return Invalid(request.Id, "system.run requires params");
+            }
+
+            if (!TryResolveSystemRunCommand(root.Value, request.Id, out var fileName, out var args, out _, out var cwd, out var invalid))
+            {
+                return invalid!;
             }
 
             int? timeoutMs = null;
@@ -173,81 +229,23 @@ namespace OpenClaw.Node.Services
                 timeoutMs = parsedTimeout;
             }
 
-            ProcessResult result;
-
-            if (root.Value.TryGetProperty("command", out var commandEl))
-            {
-                if (commandEl.ValueKind == JsonValueKind.Array)
-                {
-                    var first = true;
-                    string fileName = string.Empty;
-                    var args = new System.Collections.Generic.List<string>();
-                    foreach (var part in commandEl.EnumerateArray())
-                    {
-                        if (part.ValueKind != JsonValueKind.String)
-                        {
-                            return Invalid(request.Id, "system.run params.command array entries must be strings");
-                        }
-
-                        var value = part.GetString() ?? string.Empty;
-                        if (first)
-                        {
-                            fileName = value;
-                            first = false;
-                        }
-                        else
-                        {
-                            args.Add(value);
-                        }
-                    }
-
-                    if (string.IsNullOrWhiteSpace(fileName)) return Invalid(request.Id, "system.run command array cannot be empty");
-                    result = await RunProcessAsync(fileName, args.ToArray(), null, timeoutMs);
-                }
-                else if (commandEl.ValueKind == JsonValueKind.String)
-                {
-                    var commandText = commandEl.GetString();
-                    if (string.IsNullOrWhiteSpace(commandText)) return Invalid(request.Id, "system.run command string cannot be empty");
-
-                    if (OperatingSystem.IsWindows())
-                        result = await RunProcessAsync("cmd.exe", new[] { "/c", commandText }, null, timeoutMs);
-                    else
-                        result = await RunProcessAsync("bash", new[] { "-lc", commandText }, null, timeoutMs);
-                }
-                else
-                {
-                    return Invalid(request.Id, "system.run params.command must be string or string[]");
-                }
-            }
-            else
-            {
-                return Invalid(request.Id, "system.run requires params.command");
-            }
+            var result = await RunProcessAsync(fileName!, args!, cwd, timeoutMs);
 
             var payload = new
             {
-                ok = result.ExitCode == 0 && !result.TimedOut,
-                timedOut = result.TimedOut,
-                timeoutMs,
                 exitCode = result.ExitCode,
+                timedOut = result.TimedOut,
+                success = result.ExitCode == 0 && !result.TimedOut,
                 stdout = result.StdOut,
                 stderr = result.StdErr,
+                error = (string?)null,
             };
 
             return new BridgeInvokeResponse
             {
                 Id = request.Id,
-                Ok = result.ExitCode == 0 && !result.TimedOut,
-                PayloadJSON = ToJson(payload),
-                Error = (result.ExitCode == 0 && !result.TimedOut)
-                    ? null
-                    : new OpenClawNodeError
-                    {
-                        Code = OpenClawNodeErrorCode.Unavailable,
-                        Message = result.TimedOut
-                            ? $"system.run timed out after {timeoutMs ?? 0}ms"
-                            : $"system.run failed with exit code {result.ExitCode}"
-                    }
+                Ok = true,
+                PayloadJSON = ToJson(payload)
             };
         }
 
@@ -1999,6 +1997,157 @@ namespace OpenClaw.Node.Services
                 reason = string.IsNullOrWhiteSpace(reason) ? "not-found" : reason,
                 strategy = strategy ?? string.Empty,
             };
+
+        private static string[]? ResolveSystemWhichBins(JsonElement? root)
+        {
+            if (root == null) return null;
+
+            if (root.Value.TryGetProperty("bins", out var binsEl))
+            {
+                if (binsEl.ValueKind != JsonValueKind.Array) return Array.Empty<string>();
+                var bins = binsEl.EnumerateArray()
+                    .Where(x => x.ValueKind == JsonValueKind.String)
+                    .Select(x => (x.GetString() ?? string.Empty).Trim())
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .ToArray();
+                return bins;
+            }
+
+            if (root.Value.TryGetProperty("command", out var commandEl) && commandEl.ValueKind == JsonValueKind.String)
+            {
+                var command = (commandEl.GetString() ?? string.Empty).Trim();
+                return string.IsNullOrWhiteSpace(command) ? Array.Empty<string>() : new[] { command };
+            }
+
+            return null;
+        }
+
+        private static bool TryResolveSystemRunCommand(
+            JsonElement root,
+            string requestId,
+            out string? fileName,
+            out string[]? args,
+            out string? commandText,
+            out string? cwd,
+            out BridgeInvokeResponse? invalid)
+        {
+            invalid = null;
+            fileName = null;
+            args = null;
+            commandText = null;
+            cwd = root.TryGetProperty("cwd", out var cwdEl) && cwdEl.ValueKind == JsonValueKind.String
+                ? NormalizeNullableString(cwdEl.GetString())
+                : null;
+
+            if (!root.TryGetProperty("command", out var commandEl))
+            {
+                invalid = Invalid(requestId, "system.run requires params.command");
+                return false;
+            }
+
+            if (commandEl.ValueKind == JsonValueKind.Array)
+            {
+                var parts = commandEl.EnumerateArray().ToArray();
+                if (parts.Length == 0)
+                {
+                    invalid = Invalid(requestId, "system.run command array cannot be empty");
+                    return false;
+                }
+
+                if (parts.Any(part => part.ValueKind != JsonValueKind.String))
+                {
+                    invalid = Invalid(requestId, "system.run params.command array entries must be strings");
+                    return false;
+                }
+
+                fileName = (parts[0].GetString() ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(fileName))
+                {
+                    invalid = Invalid(requestId, "system.run command array cannot be empty");
+                    return false;
+                }
+
+                args = parts.Skip(1).Select(part => part.GetString() ?? string.Empty).ToArray();
+                commandText = string.Join(" ", new[] { fileName }.Concat(args).Select(QuoteCommandToken));
+                return true;
+            }
+
+            if (commandEl.ValueKind == JsonValueKind.String)
+            {
+                var command = commandEl.GetString();
+                if (string.IsNullOrWhiteSpace(command))
+                {
+                    invalid = Invalid(requestId, "system.run command string cannot be empty");
+                    return false;
+                }
+
+                var hasLegacyArgs = root.TryGetProperty("args", out var argsEl);
+                if (hasLegacyArgs)
+                {
+                    if (argsEl.ValueKind != JsonValueKind.Array)
+                    {
+                        invalid = Invalid(requestId, "system.run params.args must be a string[] when provided");
+                        return false;
+                    }
+
+                    var parsedArgs = new List<string>();
+                    foreach (var part in argsEl.EnumerateArray())
+                    {
+                        if (part.ValueKind != JsonValueKind.String)
+                        {
+                            invalid = Invalid(requestId, "system.run params.args entries must be strings");
+                            return false;
+                        }
+
+                        parsedArgs.Add(part.GetString() ?? string.Empty);
+                    }
+
+                    fileName = command.Trim();
+                    args = parsedArgs.ToArray();
+                    commandText = string.Join(" ", new[] { fileName }.Concat(args).Select(QuoteCommandToken));
+                    return true;
+                }
+
+                commandText = command;
+                if (OperatingSystem.IsWindows())
+                {
+                    fileName = "cmd.exe";
+                    args = new[] { "/d", "/s", "/c", command };
+                }
+                else
+                {
+                    fileName = "bash";
+                    args = new[] { "-lc", command };
+                }
+                return true;
+            }
+
+            invalid = Invalid(requestId, "system.run params.command must be string or string[]");
+            return false;
+        }
+
+        private static string? NormalizeNullableString(string? value)
+        {
+            var trimmed = value?.Trim();
+            return string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+        }
+
+        private static string? FirstNonEmptyLine(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            return text
+                .Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+                .Select(line => line.Trim())
+                .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
+        }
+
+        private static string QuoteCommandToken(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "\"\"";
+            return value.Any(char.IsWhiteSpace) || value.Contains('"')
+                ? $"\"{value.Replace("\\", "\\\\").Replace("\"", "\\\"")}\""
+                : value;
+        }
 
         private static BridgeInvokeResponse Invalid(string id, string message) => new()
         {
