@@ -15,13 +15,42 @@ namespace OpenClaw.Node.Tests
             {
                 Id = "1",
                 Command = "system.which",
-                ParamsJSON = JsonSerializer.Serialize(new { command = "dotnet" })
+                ParamsJSON = JsonSerializer.Serialize(new { bins = new[] { "dotnet" } })
             };
 
             var res = await executor.ExecuteAsync(req);
 
             Assert.True(res.Ok);
             Assert.NotNull(res.PayloadJSON);
+
+            using var doc = JsonDocument.Parse(res.PayloadJSON!);
+            var root = doc.RootElement;
+            Assert.True(root.TryGetProperty("bins", out var bins));
+            Assert.Equal(JsonValueKind.Array, bins.ValueKind);
+        }
+
+        [Fact]
+        public async Task SystemRunPrepare_ShouldReturnPlan_ForCommandArray()
+        {
+            var executor = new NodeCommandExecutor();
+            var req = new BridgeInvokeRequest
+            {
+                Id = "run-prepare-1",
+                Command = "system.run.prepare",
+                ParamsJSON = JsonSerializer.Serialize(new { command = new[] { "cmd.exe", "/c", "echo", "hi" }, cwd = "C:/tmp", agentId = "main", sessionKey = "session:test" })
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.True(res.Ok);
+            Assert.NotNull(res.PayloadJSON);
+
+            using var doc = JsonDocument.Parse(res.PayloadJSON!);
+            var plan = doc.RootElement.GetProperty("plan");
+            Assert.Equal("cmd.exe", plan.GetProperty("argv")[0].GetString());
+            Assert.Equal("C:/tmp", plan.GetProperty("cwd").GetString());
+            Assert.Equal("main", plan.GetProperty("agentId").GetString());
+            Assert.Equal("session:test", plan.GetProperty("sessionKey").GetString());
         }
 
         [Fact]
@@ -172,6 +201,32 @@ namespace OpenClaw.Node.Tests
         }
 
         [Fact]
+        public async Task SystemRun_LegacyCommandAndArgs_ShouldStillWork()
+        {
+            var executor = new NodeCommandExecutor();
+            object command = OperatingSystem.IsWindows() ? "cmd.exe" : "bash";
+            object args = OperatingSystem.IsWindows()
+                ? new[] { "/c", "echo WINDOWS_OK" }
+                : new[] { "-lc", "echo UNIX_OK" };
+            var expected = OperatingSystem.IsWindows() ? "WINDOWS_OK" : "UNIX_OK";
+            var req = new BridgeInvokeRequest
+            {
+                Id = "run-legacy-args",
+                Command = "system.run",
+                ParamsJSON = JsonSerializer.Serialize(new { command, args, timeoutMs = 5000 })
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.True(res.Ok);
+            Assert.NotNull(res.PayloadJSON);
+            using var doc = JsonDocument.Parse(res.PayloadJSON!);
+            var root = doc.RootElement;
+            Assert.True(root.GetProperty("success").GetBoolean());
+            Assert.Contains(expected, root.GetProperty("stdout").GetString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
         public async Task SystemRun_InvalidTimeoutType_ShouldReturnInvalidRequest()
         {
             var executor = new NodeCommandExecutor();
@@ -208,16 +263,14 @@ namespace OpenClaw.Node.Tests
 
             var res = await executor.ExecuteAsync(req);
 
-            Assert.False(res.Ok);
-            Assert.NotNull(res.Error);
-            Assert.Equal(OpenClawNodeErrorCode.Unavailable, res.Error!.Code);
-            Assert.Contains("timed out", res.Error.Message, StringComparison.OrdinalIgnoreCase);
-
+            Assert.True(res.Ok);
+            Assert.Null(res.Error);
             Assert.NotNull(res.PayloadJSON);
             using var doc = JsonDocument.Parse(res.PayloadJSON!);
             var root = doc.RootElement;
             Assert.True(root.GetProperty("timedOut").GetBoolean());
             Assert.Equal(-1, root.GetProperty("exitCode").GetInt32());
+            Assert.False(root.GetProperty("success").GetBoolean());
         }
 
         [Fact]

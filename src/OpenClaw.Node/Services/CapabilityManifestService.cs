@@ -66,6 +66,7 @@ namespace OpenClaw.Node.Services
                             "Use exact requestId flows for highest debugging accuracy; latest-body is a convenience helper.",
                         }
                     },
+                    new { name = "system.run.prepare", stable = true, category = "system" },
                     new { name = "system.run", stable = true, category = "system" },
                     new { name = "system.which", stable = true, category = "system" },
                     new { name = "system.notify", stable = true, category = "notifications" },
