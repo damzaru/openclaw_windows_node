@@ -25,7 +25,7 @@ namespace OpenClaw.Node.Services
             public string? Token { get; set; }
         }
 
-        internal sealed class ExecApprovalsDefaults
+        internal class ExecApprovalsDefaults
         {
             public string? Security { get; set; }
             public string? Ask { get; set; }
