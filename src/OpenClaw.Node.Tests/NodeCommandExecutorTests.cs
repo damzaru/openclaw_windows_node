@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using System.Text.Json;
 using OpenClaw.Node.Protocol;
 using OpenClaw.Node.Services;
@@ -47,10 +49,108 @@ namespace OpenClaw.Node.Tests
 
             using var doc = JsonDocument.Parse(res.PayloadJSON!);
             var plan = doc.RootElement.GetProperty("plan");
-            Assert.Equal("cmd.exe", plan.GetProperty("argv")[0].GetString());
+            var argv = plan.GetProperty("argv").EnumerateArray().ToArray();
+            Assert.Equal("cmd.exe", argv[0].GetString());
             Assert.Equal("C:/tmp", plan.GetProperty("cwd").GetString());
             Assert.Equal("main", plan.GetProperty("agentId").GetString());
             Assert.Equal("session:test", plan.GetProperty("sessionKey").GetString());
+        }
+
+        [Fact]
+        public async Task SystemExecApprovalsGet_ShouldReturnSnapshot()
+        {
+            await WithTempOpenClawHome(async () =>
+            {
+                var executor = new NodeCommandExecutor();
+                var req = new BridgeInvokeRequest
+                {
+                    Id = "exec-approvals-get-1",
+                    Command = "system.execApprovals.get",
+                    ParamsJSON = "{}"
+                };
+
+                var res = await executor.ExecuteAsync(req);
+
+                Assert.True(res.Ok);
+                Assert.NotNull(res.PayloadJSON);
+                using var doc = JsonDocument.Parse(res.PayloadJSON!);
+                var root = doc.RootElement;
+                Assert.False(root.GetProperty("exists").GetBoolean());
+                Assert.Equal(1, root.GetProperty("file").GetProperty("version").GetInt32());
+                Assert.False(string.IsNullOrWhiteSpace(root.GetProperty("hash").GetString()));
+            });
+        }
+
+        [Fact]
+        public async Task SystemExecApprovalsSet_ShouldRequireMatchingBaseHash_AndPersist()
+        {
+            await WithTempOpenClawHome(async () =>
+            {
+                var executor = new NodeCommandExecutor();
+
+                var firstGet = await executor.ExecuteAsync(new BridgeInvokeRequest
+                {
+                    Id = "exec-approvals-get-2",
+                    Command = "system.execApprovals.get",
+                    ParamsJSON = "{}"
+                });
+
+                using var getDoc = JsonDocument.Parse(firstGet.PayloadJSON!);
+                var baseHash = getDoc.RootElement.GetProperty("hash").GetString();
+
+                var setReq = new BridgeInvokeRequest
+                {
+                    Id = "exec-approvals-set-1",
+                    Command = "system.execApprovals.set",
+                    ParamsJSON = JsonSerializer.Serialize(new
+                    {
+                        baseHash,
+                        file = new
+                        {
+                            version = 1,
+                            defaults = new { security = "allowlist", ask = "on-miss" },
+                            agents = new
+                            {
+                                main = new
+                                {
+                                    allowlist = new[] { new { pattern = "python3" } }
+                                }
+                            }
+                        }
+                    })
+                };
+
+                var setRes = await executor.ExecuteAsync(setReq);
+                Assert.True(setRes.Ok);
+                Assert.NotNull(setRes.PayloadJSON);
+
+                using var setDoc = JsonDocument.Parse(setRes.PayloadJSON!);
+                var root = setDoc.RootElement;
+                Assert.True(root.GetProperty("exists").GetBoolean());
+                Assert.Equal("allowlist", root.GetProperty("file").GetProperty("defaults").GetProperty("security").GetString());
+                var allowlist = root.GetProperty("file").GetProperty("agents").GetProperty("main").GetProperty("allowlist");
+                var allowlistItems = allowlist.EnumerateArray().ToArray();
+                Assert.Single(allowlistItems);
+                var entry = allowlistItems[0];
+                Assert.Equal("python3", entry.GetProperty("pattern").GetString());
+                Assert.False(string.IsNullOrWhiteSpace(entry.GetProperty("id").GetString()));
+
+                var staleSet = await executor.ExecuteAsync(new BridgeInvokeRequest
+                {
+                    Id = "exec-approvals-set-2",
+                    Command = "system.execApprovals.set",
+                    ParamsJSON = JsonSerializer.Serialize(new
+                    {
+                        baseHash = "deadbeef",
+                        file = new { version = 1 }
+                    })
+                });
+
+                Assert.False(staleSet.Ok);
+                Assert.NotNull(staleSet.Error);
+                Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, staleSet.Error!.Code);
+                Assert.Contains("changed", staleSet.Error.Message, StringComparison.OrdinalIgnoreCase);
+            });
         }
 
         [Fact]
@@ -833,6 +933,29 @@ namespace OpenClaw.Node.Tests
             Assert.False(res.Ok);
             Assert.NotNull(res.Error);
             Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error!.Code);
+        }
+
+        private static async Task WithTempOpenClawHome(Func<Task> action)
+        {
+            var original = Environment.GetEnvironmentVariable("USERPROFILE");
+            var tempRoot = Path.Combine(Path.GetTempPath(), "oc-node-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempRoot);
+            Environment.SetEnvironmentVariable("USERPROFILE", tempRoot);
+            try
+            {
+                await action();
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("USERPROFILE", original);
+                try
+                {
+                    Directory.Delete(tempRoot, recursive: true);
+                }
+                catch
+                {
+                }
+            }
         }
 
         private sealed class FakeBrowserProxyService : IBrowserProxyService

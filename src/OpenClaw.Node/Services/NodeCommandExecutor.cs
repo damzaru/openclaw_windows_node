@@ -43,6 +43,8 @@ namespace OpenClaw.Node.Services
                 {
                     "system.notify" => HandleSystemNotify(request),
                     "system.which" => await HandleSystemWhichAsync(request),
+                    "system.execApprovals.get" => HandleSystemExecApprovalsGet(request),
+                    "system.execApprovals.set" => HandleSystemExecApprovalsSet(request),
                     "system.run.prepare" => HandleSystemRunPrepare(request),
                     "system.run" => await HandleSystemRunAsync(request),
                     "system.describe" => HandleSystemDescribe(request),
@@ -154,6 +156,68 @@ namespace OpenClaw.Node.Services
                 Ok = true,
                 PayloadJSON = ToJson(payload)
             };
+        }
+
+        private BridgeInvokeResponse HandleSystemExecApprovalsGet(BridgeInvokeRequest request)
+        {
+            try
+            {
+                var snapshot = ExecApprovalsStore.ReadSnapshot();
+                return new BridgeInvokeResponse
+                {
+                    Id = request.Id,
+                    Ok = true,
+                    PayloadJSON = ToJson(ExecApprovalsStore.ToPayload(snapshot))
+                };
+            }
+            catch (Exception ex)
+            {
+                return new BridgeInvokeResponse
+                {
+                    Id = request.Id,
+                    Ok = false,
+                    Error = new OpenClawNodeError
+                    {
+                        Code = ex.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+                            ? OpenClawNodeErrorCode.Unavailable
+                            : OpenClawNodeErrorCode.InvalidRequest,
+                        Message = ex.Message
+                    }
+                };
+            }
+        }
+
+        private BridgeInvokeResponse HandleSystemExecApprovalsSet(BridgeInvokeRequest request)
+        {
+            try
+            {
+                var parsed = ExecApprovalsStore.DecodeSetParams(request.ParamsJSON);
+                if (parsed.File == null)
+                {
+                    return Invalid(request.Id, "INVALID_REQUEST: exec approvals file required");
+                }
+
+                var snapshot = ExecApprovalsStore.Save(parsed.File, parsed.BaseHash);
+                return new BridgeInvokeResponse
+                {
+                    Id = request.Id,
+                    Ok = true,
+                    PayloadJSON = ToJson(ExecApprovalsStore.ToPayload(snapshot))
+                };
+            }
+            catch (Exception ex)
+            {
+                return new BridgeInvokeResponse
+                {
+                    Id = request.Id,
+                    Ok = false,
+                    Error = new OpenClawNodeError
+                    {
+                        Code = OpenClawNodeErrorCode.InvalidRequest,
+                        Message = ex.Message
+                    }
+                };
+            }
         }
 
         private BridgeInvokeResponse HandleSystemRunPrepare(BridgeInvokeRequest request)
