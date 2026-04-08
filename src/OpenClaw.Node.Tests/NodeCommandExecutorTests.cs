@@ -29,6 +29,8 @@ namespace OpenClaw.Node.Tests
             var root = doc.RootElement;
             Assert.True(root.TryGetProperty("bins", out var bins));
             Assert.Equal(JsonValueKind.Array, bins.ValueKind);
+            Assert.True(root.TryGetProperty("paths", out var paths));
+            Assert.Equal(JsonValueKind.Object, paths.ValueKind);
         }
 
         [Fact]
@@ -54,6 +56,58 @@ namespace OpenClaw.Node.Tests
             Assert.Equal("C:/tmp", plan.GetProperty("cwd").GetString());
             Assert.Equal("main", plan.GetProperty("agentId").GetString());
             Assert.Equal("session:test", plan.GetProperty("sessionKey").GetString());
+        }
+
+        [Fact]
+        public async Task SystemRunPrepare_ShouldUseGatewayStyleCommandFormatting_ForQuotedWindowsArgs()
+        {
+            var executor = new NodeCommandExecutor();
+            var ps = "Get-ChildItem 'C:\\Users\\david\\AppData\\Roaming\\Thunderbird' | Format-Table -AutoSize";
+            var req = new BridgeInvokeRequest
+            {
+                Id = "run-prepare-quoted-1",
+                Command = "system.run.prepare",
+                ParamsJSON = JsonSerializer.Serialize(new
+                {
+                    command = new[] { "powershell", "-NoProfile", "-Command", ps },
+                    rawCommand = $"powershell -NoProfile -Command \"{ps}\""
+                })
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.True(res.Ok);
+            Assert.NotNull(res.PayloadJSON);
+
+            using var doc = JsonDocument.Parse(res.PayloadJSON!);
+            var plan = doc.RootElement.GetProperty("plan");
+            Assert.Equal(
+                "powershell -NoProfile -Command \"Get-ChildItem 'C:\\Users\\david\\AppData\\Roaming\\Thunderbird' | Format-Table -AutoSize\"",
+                plan.GetProperty("commandText").GetString());
+            Assert.True(plan.GetProperty("commandPreview").ValueKind == JsonValueKind.Null);
+        }
+
+        [Fact]
+        public async Task SystemRunPrepare_ShouldRejectMismatchedRawCommand()
+        {
+            var executor = new NodeCommandExecutor();
+            var req = new BridgeInvokeRequest
+            {
+                Id = "run-prepare-mismatch-1",
+                Command = "system.run.prepare",
+                ParamsJSON = JsonSerializer.Serialize(new
+                {
+                    command = new[] { "cmd.exe", "/d", "/s", "/c", "echo hi" },
+                    rawCommand = "echo bye"
+                })
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.False(res.Ok);
+            Assert.NotNull(res.Error);
+            Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error!.Code);
+            Assert.Contains("rawCommand does not match command", res.Error.Message, StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]
@@ -343,6 +397,49 @@ namespace OpenClaw.Node.Tests
             Assert.NotNull(res.Error);
             Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error!.Code);
             Assert.Contains("timeoutMs", res.Error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public async Task SystemRun_ShouldRejectMismatchedRawCommand()
+        {
+            var executor = new NodeCommandExecutor();
+            var req = new BridgeInvokeRequest
+            {
+                Id = "run-invalid-raw-command",
+                Command = "system.run",
+                ParamsJSON = JsonSerializer.Serialize(new
+                {
+                    command = new[] { "cmd.exe", "/d", "/s", "/c", "echo hi" },
+                    rawCommand = "echo bye",
+                    timeoutMs = 1000
+                })
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.False(res.Ok);
+            Assert.NotNull(res.Error);
+            Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error!.Code);
+            Assert.Contains("rawCommand does not match command", res.Error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public async Task SystemNotify_EmptyNotification_ShouldReturnInvalidRequest()
+        {
+            var executor = new NodeCommandExecutor();
+            var req = new BridgeInvokeRequest
+            {
+                Id = "notify-empty-1",
+                Command = "system.notify",
+                ParamsJSON = JsonSerializer.Serialize(new { title = "   ", body = "   " })
+            };
+
+            var res = await executor.ExecuteAsync(req);
+
+            Assert.False(res.Ok);
+            Assert.NotNull(res.Error);
+            Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error!.Code);
+            Assert.Contains("empty notification", res.Error.Message, StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]

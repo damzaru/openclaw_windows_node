@@ -95,8 +95,23 @@ namespace OpenClaw.Node.Services
         private BridgeInvokeResponse HandleSystemNotify(BridgeInvokeRequest request)
         {
             var root = ParseParams(request.ParamsJSON);
-            var title = root?.TryGetProperty("title", out var t) == true ? t.GetString() : null;
-            var body = root?.TryGetProperty("body", out var b) == true ? b.GetString() : null;
+            if (root == null)
+            {
+                return Invalid(request.Id, "INVALID_REQUEST: expected JSON object with title/body");
+            }
+
+            if (!root.Value.TryGetProperty("title", out var titleEl) || titleEl.ValueKind != JsonValueKind.String ||
+                !root.Value.TryGetProperty("body", out var bodyEl) || bodyEl.ValueKind != JsonValueKind.String)
+            {
+                return Invalid(request.Id, "INVALID_REQUEST: expected JSON object with title/body");
+            }
+
+            var title = (titleEl.GetString() ?? string.Empty).Trim();
+            var body = (bodyEl.GetString() ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(body))
+            {
+                return Invalid(request.Id, "INVALID_REQUEST: empty notification");
+            }
 
             Console.WriteLine($"[NOTIFY] {title ?? "(no title)"}: {body ?? ""}");
             return new BridgeInvokeResponse
@@ -126,7 +141,8 @@ namespace OpenClaw.Node.Services
             }
 
             var whichProgram = OperatingSystem.IsWindows() ? "where" : "which";
-            var resolved = new System.Collections.Generic.List<object>();
+            var matches = new System.Collections.Generic.List<string>();
+            var paths = new Dictionary<string, string>(StringComparer.Ordinal);
             var missing = new System.Collections.Generic.List<string>();
 
             foreach (var bin in bins)
@@ -136,7 +152,8 @@ namespace OpenClaw.Node.Services
                 var found = result.ExitCode == 0 && !string.IsNullOrWhiteSpace(path);
                 if (found)
                 {
-                    resolved.Add(new { name = bin, resolvedPath = path! });
+                    matches.Add(bin);
+                    paths[bin] = path!;
                 }
                 else
                 {
@@ -146,7 +163,8 @@ namespace OpenClaw.Node.Services
 
             var payload = new
             {
-                bins = resolved,
+                bins = matches,
+                paths,
                 missing,
             };
 
@@ -228,7 +246,7 @@ namespace OpenClaw.Node.Services
                 return Invalid(request.Id, "system.run.prepare requires params");
             }
 
-            if (!TryResolveSystemRunCommand(root.Value, request.Id, out var fileName, out var args, out var commandText, out _, out var invalid))
+            if (!TryResolveSystemRunCommand(root.Value, request.Id, out var fileName, out var args, out var commandText, out var commandPreview, out _, out var invalid))
             {
                 return invalid!;
             }
@@ -255,7 +273,7 @@ namespace OpenClaw.Node.Services
                         argv,
                         cwd,
                         commandText,
-                        commandPreview = (string?)null,
+                        commandPreview,
                         agentId,
                         sessionKey,
                         mutableFileOperand = (object?)null,
@@ -272,7 +290,7 @@ namespace OpenClaw.Node.Services
                 return Invalid(request.Id, "system.run requires params");
             }
 
-            if (!TryResolveSystemRunCommand(root.Value, request.Id, out var fileName, out var args, out _, out var cwd, out var invalid))
+            if (!TryResolveSystemRunCommand(root.Value, request.Id, out var fileName, out var args, out _, out _, out var cwd, out var invalid))
             {
                 return invalid!;
             }
@@ -2092,6 +2110,7 @@ namespace OpenClaw.Node.Services
             out string? fileName,
             out string[]? args,
             out string? commandText,
+            out string? commandPreview,
             out string? cwd,
             out BridgeInvokeResponse? invalid)
         {
@@ -2099,8 +2118,12 @@ namespace OpenClaw.Node.Services
             fileName = null;
             args = null;
             commandText = null;
+            commandPreview = null;
             cwd = root.TryGetProperty("cwd", out var cwdEl) && cwdEl.ValueKind == JsonValueKind.String
                 ? NormalizeNullableString(cwdEl.GetString())
+                : null;
+            var rawCommand = root.TryGetProperty("rawCommand", out var rawCommandEl) && rawCommandEl.ValueKind == JsonValueKind.String
+                ? NormalizeNullableString(rawCommandEl.GetString())
                 : null;
 
             if (!root.TryGetProperty("command", out var commandEl))
@@ -2132,8 +2155,7 @@ namespace OpenClaw.Node.Services
                 }
 
                 args = parts.Skip(1).Select(part => part.GetString() ?? string.Empty).ToArray();
-                commandText = string.Join(" ", new[] { fileName }.Concat(args).Select(QuoteCommandToken));
-                return true;
+                return TryBuildSystemRunDisplay(requestId, fileName, args, rawCommand, true, out commandText, out commandPreview, out invalid);
             }
 
             if (commandEl.ValueKind == JsonValueKind.String)
@@ -2168,11 +2190,9 @@ namespace OpenClaw.Node.Services
 
                     fileName = command.Trim();
                     args = parsedArgs.ToArray();
-                    commandText = string.Join(" ", new[] { fileName }.Concat(args).Select(QuoteCommandToken));
-                    return true;
+                    return TryBuildSystemRunDisplay(requestId, fileName, args, rawCommand, true, out commandText, out commandPreview, out invalid);
                 }
 
-                commandText = command;
                 if (OperatingSystem.IsWindows())
                 {
                     fileName = "cmd.exe";
@@ -2183,11 +2203,57 @@ namespace OpenClaw.Node.Services
                     fileName = "bash";
                     args = new[] { "-lc", command };
                 }
-                return true;
+                return TryBuildSystemRunDisplay(requestId, fileName, args, rawCommand, true, out commandText, out commandPreview, out invalid);
             }
 
             invalid = Invalid(requestId, "system.run params.command must be string or string[]");
             return false;
+        }
+
+        private static bool TryBuildSystemRunDisplay(
+            string requestId,
+            string? fileName,
+            string[]? args,
+            string? rawCommand,
+            bool allowLegacyShellText,
+            out string? commandText,
+            out string? commandPreview,
+            out BridgeInvokeResponse? invalid)
+        {
+            invalid = null;
+            commandText = null;
+            commandPreview = null;
+
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                invalid = Invalid(requestId, "system.run command array cannot be empty");
+                return false;
+            }
+
+            var argv = new[] { fileName! }.Concat(args ?? Array.Empty<string>()).ToArray();
+            commandText = FormatExecCommand(argv);
+            commandPreview = ExtractShellCommandPreview(argv);
+
+            if (!string.IsNullOrWhiteSpace(rawCommand))
+            {
+                var trimmedRaw = rawCommand!.Trim();
+                var matchesCanonical = string.Equals(trimmedRaw, commandText, StringComparison.Ordinal);
+                var matchesLegacyShellText = allowLegacyShellText &&
+                    !string.IsNullOrWhiteSpace(commandPreview) &&
+                    string.Equals(trimmedRaw, commandPreview, StringComparison.Ordinal);
+                if (!matchesCanonical && !matchesLegacyShellText)
+                {
+                    invalid = Invalid(requestId, "INVALID_REQUEST: rawCommand does not match command");
+                    return false;
+                }
+
+                if (matchesCanonical)
+                {
+                    commandPreview = null;
+                }
+            }
+
+            return true;
         }
 
         private static string? NormalizeNullableString(string? value)
@@ -2205,11 +2271,60 @@ namespace OpenClaw.Node.Services
                 .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
         }
 
-        private static string QuoteCommandToken(string value)
+        private static string FormatExecCommand(IEnumerable<string> argv)
+            => string.Join(" ", argv.Select(FormatExecToken));
+
+        private static string? ExtractShellCommandPreview(string[] argv)
+        {
+            if (argv.Length == 0) return null;
+
+            var executable = System.IO.Path.GetFileNameWithoutExtension((argv[0] ?? string.Empty).Trim()).ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(executable)) return null;
+
+            if (executable == "cmd")
+            {
+                for (var i = 1; i < argv.Length; i++)
+                {
+                    var token = (argv[i] ?? string.Empty).Trim();
+                    if (string.Equals(token, "/c", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(token, "/k", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (i + 1 >= argv.Length) return null;
+                        if (argv.Skip(i + 2).Any(part => !string.IsNullOrWhiteSpace(part))) return null;
+                        return NormalizeNullableString(argv[i + 1]);
+                    }
+                }
+                return null;
+            }
+
+            var isPosixShell = executable is "sh" or "bash" or "zsh" or "dash" or "fish" or "ksh" or "ash";
+            var isPowerShell = executable is "powershell" or "pwsh";
+            if (!isPosixShell && !isPowerShell)
+            {
+                return null;
+            }
+
+            var inlineFlags = isPowerShell
+                ? new[] { "-c", "-command", "--command", "-f", "-file", "-enc", "-encodedcommand" }
+                : new[] { "-c", "-lc", "--command" };
+
+            for (var i = 1; i < argv.Length; i++)
+            {
+                var token = (argv[i] ?? string.Empty).Trim();
+                if (!inlineFlags.Contains(token, StringComparer.OrdinalIgnoreCase)) continue;
+                if (i + 1 >= argv.Length) return null;
+                if (argv.Skip(i + 2).Any(part => !string.IsNullOrWhiteSpace(part))) return null;
+                return NormalizeNullableString(argv[i + 1]);
+            }
+
+            return null;
+        }
+
+        private static string FormatExecToken(string value)
         {
             if (string.IsNullOrEmpty(value)) return "\"\"";
             return value.Any(char.IsWhiteSpace) || value.Contains('"')
-                ? $"\"{value.Replace("\\", "\\\\").Replace("\"", "\\\"")}\""
+                ? $"\"{value.Replace("\"", "\\\"")}\""
                 : value;
         }
 
