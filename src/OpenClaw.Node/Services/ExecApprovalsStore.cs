@@ -267,7 +267,8 @@ namespace OpenClaw.Node.Services
             var next = new List<ExecAllowlistEntry>();
             foreach (var entry in allowlist)
             {
-                var pattern = entry?.Pattern?.Trim();
+                if (entry == null) continue;
+                var pattern = entry.Pattern?.Trim();
                 if (string.IsNullOrWhiteSpace(pattern)) continue;
                 next.Add(new ExecAllowlistEntry
                 {
