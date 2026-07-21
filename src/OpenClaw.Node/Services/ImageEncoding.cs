@@ -25,8 +25,8 @@ namespace OpenClaw.Node.Services
         {
 #if WINDOWS
             if (imageBytes == null || imageBytes.Length == 0) return new EncodedImage();
-            maxWidth = Math.Clamp(maxWidth, 64, 8000);
-            quality = Math.Clamp(quality, 0.1, 1.0);
+            maxWidth = Math.Clamp(maxWidth, 1, 8000);
+            quality = Math.Clamp(quality, 0.05, 1.0);
 
             using var input = new MemoryStream(imageBytes);
             using var srcImage = Image.FromStream(input);
@@ -78,6 +78,43 @@ namespace OpenClaw.Node.Services
             };
 #else
             return new EncodedImage();
+#endif
+        }
+
+        public static EncodedImage EncodePngBase64(byte[] imageBytes, int maxWidth = 900)
+        {
+#if WINDOWS
+            if (imageBytes == null || imageBytes.Length == 0) return new EncodedImage { MimeType = "image/png", Format = "png" };
+            maxWidth = Math.Clamp(maxWidth, 1, 8000);
+            using var input = new MemoryStream(imageBytes);
+            using var source = Image.FromStream(input);
+            var outWidth = Math.Min(source.Width, maxWidth);
+            var outHeight = outWidth == source.Width
+                ? source.Height
+                : Math.Max(1, (int)Math.Round(source.Height * ((double)outWidth / source.Width)));
+            using var bitmap = new Bitmap(outWidth, outHeight, PixelFormat.Format32bppArgb);
+            using (var graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                graphics.DrawImage(source, 0, 0, outWidth, outHeight);
+            }
+            using var output = new MemoryStream();
+            bitmap.Save(output, ImageFormat.Png);
+            var bytes = output.ToArray();
+            return new EncodedImage
+            {
+                Base64 = Convert.ToBase64String(bytes),
+                Width = outWidth,
+                Height = outHeight,
+                Bytes = bytes.Length,
+                MimeType = "image/png",
+                Format = "png",
+            };
+#else
+            return new EncodedImage { MimeType = "image/png", Format = "png" };
 #endif
         }
     }

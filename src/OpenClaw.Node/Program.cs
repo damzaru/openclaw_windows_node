@@ -19,26 +19,45 @@ namespace OpenClaw.Node
             Console.WriteLine($"OpenClaw Node for Windows starting... build={BuildInfo.BuildVersion}");
 
             var configPath = GetOpenClawConfigPath();
+            var settingsStore = new CompanionSettingsStore();
+            var hasSavedSettings = settingsStore.HasSavedSettings;
+            var settings = settingsStore.Load();
             var forceTray = HasArg(args, "--tray");
             var disableTray = HasArg(args, "--no-tray");
             var trayEnabled = !disableTray && (forceTray || OperatingSystem.IsWindows());
             string url = ResolveGatewayUrl(args, out var configReadErrorUrl);
             string token = ResolveGatewayToken(args, out var configReadErrorToken);
+            var explicitUrl = HasArg(args, "--gateway-url") || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_URL"));
+            var explicitToken = HasArg(args, "--gateway-token") || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_TOKEN"));
+            if (!explicitUrl && hasSavedSettings) url = settings.GatewayUrl;
+            if (!explicitToken && hasSavedSettings) token = settings.GatewayToken ?? string.Empty;
+            if (!explicitToken && !hasSavedSettings && !string.IsNullOrWhiteSpace(token))
+            {
+                // One-time, read-only import from the legacy config into the
+                // companion's CurrentUser-DPAPI store.
+                settings.GatewayUrl = url;
+                settings.GatewayToken = token;
+                settingsStore.Save(settings);
+            }
             var configReadError = configReadErrorUrl ?? configReadErrorToken;
             var hasGatewayToken = !string.IsNullOrWhiteSpace(token);
+            var hasStoredNodeToken = !hasGatewayToken && HasStoredDeviceToken(url, "node");
+            var hasGatewayCredential = hasGatewayToken || hasStoredNodeToken;
 
-            if (!hasGatewayToken && !trayEnabled)
+            if (!hasGatewayCredential && !trayEnabled)
             {
-                Console.WriteLine("[FATAL] Missing gateway token. Set OPENCLAW_GATEWAY_TOKEN, pass --gateway-token <token>, or run with --tray and open config.");
+                Console.WriteLine("[FATAL] Missing gateway token. Set OPENCLAW_GATEWAY_TOKEN, pass --gateway-token <token>, or run with --tray and open Settings.");
                 return;
             }
 
             try
             {
+            var manifest = NodeCapabilityRegistry.Build(settings);
+            var instanceId = Guid.NewGuid().ToString();
             var connectParams = new ConnectParams
             {
-                MinProtocol = Constants.GatewayProtocolVersion,
-                MaxProtocol = Constants.GatewayProtocolVersion,
+                MinProtocol = Constants.MinimumNodeProtocolVersion,
+                MaxProtocol = Constants.MaximumNodeProtocolVersion,
                 Role = "node",
                 Client = new Dictionary<string, object>
                 {
@@ -47,25 +66,59 @@ namespace OpenClaw.Node
                     { "platform", "windows" },
                     { "mode", "node" },
                     { "version", $"dev+{BuildInfo.BuildVersion}" },
-                    { "instanceId", Guid.NewGuid().ToString() },
+                    { "instanceId", instanceId },
                     { "deviceFamily", "Windows" }
                 },
-                Caps = new List<string> { "screenRecording", "notifications", "microphone", "browser" },
-                Locale = "en-US",
+                Caps = manifest.Capabilities.ToList(),
+                Locale = System.Globalization.CultureInfo.CurrentCulture.Name,
                 UserAgent = Environment.OSVersion.VersionString,
                 Scopes = new List<string>(),
-                Commands = new List<string> { "system.execApprovals.get", "system.execApprovals.set", "system.run.prepare", "system.run", "system.which", "system.notify", "system.describe", "browser.proxy", "screen.capture", "screen.list", "screen.record", "camera.list", "camera.snap", "window.list", "window.focus", "window.rect", "input.type", "input.key", "input.click", "input.scroll", "input.click.relative", "ui.find", "ui.click", "ui.type" },
-                Permissions = new Dictionary<string, object>()
+                Commands = manifest.GatewayCommands.ToList(),
+                Permissions = new Dictionary<string, bool>()
+            };
+
+            var operatorParams = new ConnectParams
+            {
+                MinProtocol = Constants.GatewayProtocolVersion,
+                MaxProtocol = Constants.GatewayProtocolVersion,
+                Role = "operator",
+                Scopes = new List<string> { "operator.read", "operator.write" },
+                Client = new Dictionary<string, object>
+                {
+                    { "id", "node-host" },
+                    { "displayName", $"{Environment.MachineName} Companion" },
+                    { "platform", "windows" },
+                    { "mode", "ui" },
+                    { "version", $"dev+{BuildInfo.BuildVersion}" },
+                    { "instanceId", instanceId },
+                    { "deviceFamily", "Windows" }
+                },
+                Locale = System.Globalization.CultureInfo.CurrentCulture.Name,
+                UserAgent = Environment.OSVersion.VersionString,
             };
 
             using var cts = new CancellationTokenSource();
             var restartRequested = false;
 
             var core = new CoreMethodService(startedAtUtc);
-            using var ipc = new IpcPipeServerService(version: "dev", authToken: token);
-            using var connection = new GatewayConnection(url, token, connectParams);
+            var ipcCredential = new IpcCredentialService().LoadOrCreate();
+            using var ipc = new IpcPipeServerService(version: "dev", authToken: ipcCredential);
+            var gatewayOptions = new GatewayConnectionOptions { TlsCertificateSha256 = settings.TlsCertificateSha256 };
+            using var connection = new GatewayConnection(url, token, connectParams, gatewayOptions);
+            using var operatorConnection = settings.EnableTalkPushToTalk || settings.EnableCanvas
+                ? new GatewayConnection(url, token, operatorParams, gatewayOptions)
+                : null;
             var browserProxy = new BrowserProxyService();
-            var executor = new NodeCommandExecutor(connection, browserProxyService: browserProxy);
+            ITrayHost? trayHost = null;
+            using var executor = new NodeCommandExecutor(
+                connection,
+                browserProxyService: browserProxy,
+                settings: settings,
+                operatorClient: operatorConnection,
+                instanceId: instanceId,
+                notificationSink: (title, body, cancellationToken) =>
+                    trayHost?.ShowNotificationAsync(title, body, cancellationToken)
+                    ?? Task.FromException(new InvalidOperationException("Windows notification tray is not active")));
             using var discovery = new DiscoveryService(connectParams, url);
             var trayStatus = new TrayStatusBroadcaster(buildVersion: BuildInfo.BuildVersion);
             var reconnectStartedAtUtc = (DateTimeOffset?)null;
@@ -78,8 +131,6 @@ namespace OpenClaw.Node
                 trayStatus.Set(state, message, core.PendingPairCount, lastReconnectMs, onboarding.StatusText);
             }
 
-            ITrayHost? trayHost = null;
-
             if (trayEnabled)
             {
                 trayHost = OperatingSystem.IsWindows()
@@ -87,6 +138,12 @@ namespace OpenClaw.Node
                         log: msg => Console.WriteLine(msg),
                         onOpenLogs: () => OpenLogsFolder(),
                         onOpenConfig: () => OpenConfigFile(configPath),
+                        onOpenSettings: () =>
+                        {
+                            if (!CompanionSettingsDialog.Show(settingsStore)) return;
+                            restartRequested = true;
+                            cts.Cancel();
+                        },
                         onRestart: () => { restartRequested = true; cts.Cancel(); },
                         onExit: () => cts.Cancel(),
                         onCopyDiagnostics: () => CopyDiagnosticsToClipboard(BuildDiagnostics(startedAtUtc, url, trayStatus.Current, core.PendingPairCount, lastReconnectMs)))
@@ -99,13 +156,13 @@ namespace OpenClaw.Node
 
                 var lowered = msg.ToLowerInvariant();
                 var isAuthSignal = lowered.Contains("connect rejected") || lowered.Contains("unauthorized") || lowered.Contains("forbidden") || lowered.Contains("auth") || lowered.Contains("token") || lowered.Contains("pre-connect-close");
-                if (isAuthSignal && !authDialogShown && hasGatewayToken)
+                if (isAuthSignal && !authDialogShown && hasGatewayCredential)
                 {
                     authDialogShown = true;
                     SetTray(NodeRuntimeState.Disconnected, "Authentication failed (check token)");
                     ShowUserWarningDialog(
                         "OpenClaw Authentication Failed",
-                        "The gateway rejected node authentication.\n\nPlease verify gateway.auth.token in Open Config, save, then click Restart Node.");
+                        "The gateway rejected node authentication.\n\nOpen Settings, verify the Gateway token, save, and restart the companion.");
                 }
 
                 if (msg.Contains("Reconnecting in", StringComparison.OrdinalIgnoreCase))
@@ -142,8 +199,13 @@ namespace OpenClaw.Node
                 SetTray(NodeRuntimeState.Disconnected, "Authentication failed (check token)");
                 ShowUserWarningDialog(
                     "OpenClaw Authentication Failed",
-                    "Gateway rejected this node authentication.\n\nPlease verify gateway.auth.token in Open Config, save, then click Restart Node.");
+                    "Gateway rejected this node authentication.\n\nOpen Settings, verify the Gateway token, save, and restart the companion.");
             };
+            if (operatorConnection != null)
+            {
+                operatorConnection.OnLog += message => Console.WriteLine($"[operator sidecar] {message}");
+                operatorConnection.OnConnectRejected += message => Console.WriteLine($"[operator sidecar] rejected: {message}");
+            }
             ipc.OnLog += msg => Console.WriteLine(msg);
             discovery.OnLog += msg => Console.WriteLine(msg);
             connection.OnEventReceived += evt =>
@@ -155,28 +217,12 @@ namespace OpenClaw.Node
                 }
             };
 
-            connection.OnNodeInvoke += async req =>
+            connection.OnNodeInvokeContext += async context =>
             {
+                var req = context.Request;
                 Console.WriteLine($"[INVOKE] Received bridge command: {req.Command}");
-                return await executor.ExecuteAsync(req);
+                return await executor.ExecuteAsync(req, context.CancellationToken);
             };
-
-            // Register Method Handlers (Core)
-            connection.RegisterMethodHandler("status", core.HandleStatusAsync);
-            connection.RegisterMethodHandler("health", core.HandleHealthAsync);
-            connection.RegisterMethodHandler("set-heartbeats", core.HandleSetHeartbeatsAsync);
-            connection.RegisterMethodHandler("system-event", core.HandleSystemEventAsync);
-            connection.RegisterMethodHandler("channels.status", core.HandleChannelsStatusAsync);
-            connection.RegisterMethodHandler("config.get", core.HandleConfigGetAsync);
-            connection.RegisterMethodHandler("config.schema", core.HandleConfigSchemaAsync);
-            connection.RegisterMethodHandler("config.set", core.HandleConfigSetAsync);
-            connection.RegisterMethodHandler("config.patch", core.HandleConfigPatchAsync);
-            connection.RegisterMethodHandler("node.pair.list", core.HandleNodePairListAsync);
-            connection.RegisterMethodHandler("node.pair.approve", core.HandleNodePairApproveAsync);
-            connection.RegisterMethodHandler("node.pair.reject", core.HandleNodePairRejectAsync);
-            connection.RegisterMethodHandler("device.pair.list", core.HandleDevicePairListAsync);
-            connection.RegisterMethodHandler("device.pair.approve", core.HandleDevicePairApproveAsync);
-            connection.RegisterMethodHandler("device.pair.reject", core.HandleDevicePairRejectAsync);
 
             if (trayHost != null)
             {
@@ -210,14 +256,14 @@ namespace OpenClaw.Node
                     }
                 }
 
-                if (!hasGatewayToken)
+                if (!hasGatewayCredential)
                 {
                     SetTray(NodeRuntimeState.Disconnected, "Setup needed: add gateway token");
-                    Console.WriteLine("[WARN] Gateway token missing. Tray mode is active; open config, set gateway.auth.token, then restart node.");
+                    Console.WriteLine("[WARN] Gateway token missing. Tray mode is active; open Settings, enter the token, and restart the companion.");
                     var details = string.IsNullOrWhiteSpace(onboarding.Details) ? string.Empty : $"\n\nDetails: {onboarding.Details}";
                     ShowUserWarningDialog(
                         title: "OpenClaw Node Setup Required",
-                        message: $"{onboarding.StatusText}.\n\n{onboarding.ActionHint}.\n\nOpen tray menu → Open Config, save your changes, then click Restart Node.{details}");
+                        message: $"{onboarding.StatusText}.\n\n{onboarding.ActionHint}.\n\nOpen the tray menu → Settings, save your changes, and the companion will restart.{details}");
                     await WaitUntilCanceledAsync(cts.Token);
                     return;
                 }
@@ -225,7 +271,8 @@ namespace OpenClaw.Node
                 discovery.Start(cts.Token);
                 ipc.Start(cts.Token);
                 var runTask = connection.StartAsync(cts.Token);
-                await runTask;
+                var operatorTask = operatorConnection?.StartAsync(cts.Token) ?? Task.CompletedTask;
+                await Task.WhenAll(runTask, operatorTask);
             }
             catch (TaskCanceledException) { }
             catch (Exception ex)
@@ -257,7 +304,7 @@ namespace OpenClaw.Node
                 {
                     ShowUserWarningDialog(
                         "OpenClaw Node Setup Error",
-                        "Node startup failed due to invalid configuration (for example gateway URL).\n\nOpen tray menu → Open Config, fix values, save, then restart node.");
+                        "Node startup failed due to invalid configuration (for example gateway URL).\n\nOpen the tray menu → Settings, fix the values, and save to restart the companion.");
                 }
             }
         }
@@ -271,6 +318,21 @@ namespace OpenClaw.Node
             catch (TaskCanceledException)
             {
                 // expected
+            }
+        }
+
+        private static bool HasStoredDeviceToken(string gatewayUrl, string role)
+        {
+            try
+            {
+                var endpoint = new Uri(gatewayUrl);
+                var identity = new DeviceIdentityService().LoadOrCreate();
+                return new DeviceTokenStore().Load(endpoint, identity.DeviceId, role) is { Token.Length: > 0 };
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[AUTH] Stored device-token lookup skipped: {ex.Message}");
+                return false;
             }
         }
 
@@ -317,13 +379,15 @@ namespace OpenClaw.Node
                 var dir = Path.Combine(home, ".openclaw");
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
-                Process.Start(new ProcessStartInfo
+                var start = new ProcessStartInfo
                 {
                     FileName = "explorer.exe",
                     Arguments = QuoteForCmd(dir),
                     UseShellExecute = false,
                     CreateNoWindow = true
-                });
+                };
+                ChildProcessSecurity.ScrubSensitiveEnvironment(start);
+                Process.Start(start);
             }
             catch (Exception ex)
             {
@@ -344,13 +408,15 @@ namespace OpenClaw.Node
                         "{\n  \"gateway\": {\n    \"host\": \"127.0.0.1\",\n    \"port\": 18789,\n    \"auth\": {\n      \"token\": \"\"\n    }\n  }\n}\n");
                 }
 
-                Process.Start(new ProcessStartInfo
+                var start = new ProcessStartInfo
                 {
                     FileName = "notepad.exe",
                     Arguments = QuoteForCmd(configPath),
                     UseShellExecute = false,
                     CreateNoWindow = true
-                });
+                };
+                ChildProcessSecurity.ScrubSensitiveEnvironment(start);
+                Process.Start(start);
             }
             catch (Exception ex)
             {
@@ -412,13 +478,15 @@ namespace OpenClaw.Node
             try
             {
                 var escaped = text.Replace("'", "''");
-                Process.Start(new ProcessStartInfo
+                var start = new ProcessStartInfo
                 {
                     FileName = "powershell",
                     Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"Set-Clipboard -Value '{escaped}'\"",
                     UseShellExecute = false,
                     CreateNoWindow = true
-                });
+                };
+                ChildProcessSecurity.ScrubSensitiveEnvironment(start);
+                Process.Start(start);
                 Console.WriteLine("[TRAY] Diagnostics copied to clipboard.");
             }
             catch (Exception ex)
@@ -448,13 +516,15 @@ namespace OpenClaw.Node
                     argBuilder.Append(QuoteForCmd(args[i]));
                 }
 
-                Process.Start(new ProcessStartInfo
+                var start = new ProcessStartInfo
                 {
                     FileName = "cmd.exe",
                     Arguments = $"/c timeout /t {delaySeconds} /nobreak >nul && start \"\" {QuoteForCmd(processPath)} {argBuilder} && taskkill /PID {Environment.ProcessId} /F",
                     UseShellExecute = false,
                     CreateNoWindow = true
-                });
+                };
+                ChildProcessSecurity.ScrubSensitiveEnvironment(start);
+                Process.Start(start);
 
                 Console.WriteLine($"[TRAY] Restart scheduled in {delaySeconds}s.");
             }

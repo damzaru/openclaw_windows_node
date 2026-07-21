@@ -26,21 +26,19 @@ namespace OpenClaw.Node.Tests
         }
 
         [Fact]
-        public void Evaluate_ShouldFail_WhenConfigMissing()
+        public void Evaluate_ShouldPass_WhenLegacyConfigMissingButSecureSettingsResolved()
         {
             var missingPath = Path.Combine(Path.GetTempPath(), $"openclaw-missing-{Guid.NewGuid():N}.json");
             var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "abc", missingPath);
-            Assert.False(result.Ready);
-            Assert.Contains("Config file missing", result.StatusText);
+            Assert.True(result.Ready);
         }
 
         [Fact]
-        public void Evaluate_ShouldFail_WhenConfigHasParseError()
+        public void Evaluate_ShouldPass_WhenLegacyConfigHasParseErrorButSecureSettingsResolved()
         {
             var configPath = CreateTempConfig();
             var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "abc", configPath, "Unexpected token at line 1");
-            Assert.False(result.Ready);
-            Assert.Contains("Config format", result.StatusText);
+            Assert.True(result.Ready);
         }
 
         [Fact]

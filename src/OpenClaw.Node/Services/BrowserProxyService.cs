@@ -1589,6 +1589,7 @@ namespace OpenClaw.Node.Services
                         "--experimentalStructuredContent",
                         "--experimental-page-id-routing"
                     },
+                    EnvironmentVariables = ChildProcessSecurity.SensitiveEnvironmentRemovals(),
                     StandardErrorLines = line =>
                     {
                         if (string.IsNullOrWhiteSpace(line)) return;

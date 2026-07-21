@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Diagnostics;
 
@@ -28,7 +29,7 @@ AAAAAAAAAAH/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAABP/9k=";
 
         public string? LastError { get; private set; }
 
-        public async Task<CameraDeviceInfo[]> ListDevicesAsync()
+        public async Task<CameraDeviceInfo[]> ListDevicesAsync(CancellationToken cancellationToken = default)
         {
             LastError = null;
             if (!OperatingSystem.IsWindows())
@@ -37,17 +38,17 @@ AAAAAAAAAAH/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAABP/9k=";
                 return Array.Empty<CameraDeviceInfo>();
             }
 
-            var (devices, error) = await TryListDevicesWithWinRtAsync();
+            var (devices, error) = await TryListDevicesWithWinRtAsync(cancellationToken);
             if (devices.Length > 0)
             {
                 LastError = null;
                 return devices;
             }
 
-            var ffmpeg = await ResolveFfmpegPathAsync();
+            var ffmpeg = await ResolveFfmpegPathAsync(cancellationToken);
             if (!string.IsNullOrWhiteSpace(ffmpeg))
             {
-                var (fallbackDevices, ffErr) = await TryListDevicesWithFfmpegAsync(ffmpeg);
+                var (fallbackDevices, ffErr) = await TryListDevicesWithFfmpegAsync(ffmpeg, cancellationToken);
                 if (fallbackDevices.Length > 0)
                 {
                     LastError = null;
@@ -67,11 +68,12 @@ AAAAAAAAAAH/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAABP/9k=";
             int? maxWidth,
             double? quality,
             int? delayMs,
-            string? deviceId)
+            string? deviceId,
+            CancellationToken cancellationToken = default)
         {
             LastError = null;
             var clampedDelay = Math.Clamp(delayMs ?? 0, 0, 10000);
-            if (clampedDelay > 0) await Task.Delay(clampedDelay);
+            if (clampedDelay > 0) await Task.Delay(clampedDelay, cancellationToken);
 
             if (!OperatingSystem.IsWindows())
             {
@@ -79,8 +81,8 @@ AAAAAAAAAAH/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAABP/9k=";
                 return (PlaceholderJpegBase64, 1, 1);
             }
 
-            var resolvedWinRtDeviceId = await ResolvePreferredWinRtDeviceIdAsync(facing, deviceId);
-            var (bytes, error) = await TryCaptureWithWinRtAsync(resolvedWinRtDeviceId);
+            var resolvedWinRtDeviceId = await ResolvePreferredWinRtDeviceIdAsync(facing, deviceId, cancellationToken);
+            var (bytes, error) = await TryCaptureWithWinRtAsync(resolvedWinRtDeviceId, cancellationToken);
             if (bytes != null && bytes.Length > 0 && IsLikelyJpeg(bytes))
             {
                 var effective = ApplyJpegOutputOptions(bytes, maxWidth, quality);
@@ -90,10 +92,10 @@ AAAAAAAAAAH/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAABP/9k=";
             }
 
             // Optional shipped fallback: bundled ffmpeg binary (no user install required).
-            var ffmpeg = await ResolveFfmpegPathAsync();
+            var ffmpeg = await ResolveFfmpegPathAsync(cancellationToken);
             if (!string.IsNullOrWhiteSpace(ffmpeg))
             {
-                var (ffBytes, ffErr) = await TryCaptureWithFfmpegAsync(ffmpeg, facing, maxWidth, quality, deviceId);
+                var (ffBytes, ffErr) = await TryCaptureWithFfmpegAsync(ffmpeg, facing, maxWidth, quality, deviceId, cancellationToken);
                 if (ffBytes != null && ffBytes.Length > 0 && IsLikelyJpeg(ffBytes))
                 {
                     LastError = null;
@@ -109,14 +111,88 @@ AAAAAAAAAAH/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAABP/9k=";
             return (PlaceholderJpegBase64, 1, 1);
         }
 
-        private async Task<string?> ResolvePreferredWinRtDeviceIdAsync(string facing, string? explicitDeviceId)
+        public async Task<(string Base64, int DurationMs, bool HasAudio)> CaptureMp4ClipAsBase64Async(
+            int durationMs,
+            string facing,
+            string? deviceId,
+            bool includeAudio,
+            CancellationToken cancellationToken = default)
+        {
+            LastError = null;
+            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("camera.clip is only available on Windows");
+            var ffmpeg = await ResolveFfmpegPathAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(ffmpeg)) throw new InvalidOperationException("CAMERA_UNAVAILABLE: ffmpeg runtime is required for camera.clip");
+            var (devices, listError) = await TryListDevicesWithFfmpegAsync(ffmpeg, cancellationToken);
+            if (devices.Length == 0) throw new InvalidOperationException("CAMERA_UNAVAILABLE: " + (listError ?? "no camera found"));
+            var selected = !string.IsNullOrWhiteSpace(deviceId)
+                ? devices.FirstOrDefault(value => string.Equals(value.Id, deviceId, StringComparison.OrdinalIgnoreCase))
+                : null;
+            selected ??= devices.FirstOrDefault(value => string.Equals(value.Position, facing, StringComparison.OrdinalIgnoreCase)) ?? devices[0];
+            string? audioDevice = null;
+            if (includeAudio)
+            {
+                var (audioDevices, audioError) = await TryListAudioDevicesWithFfmpegAsync(ffmpeg, cancellationToken);
+                if (audioDevices.Length == 0)
+                    throw new InvalidOperationException("MIC_PERMISSION_REQUIRED: " + (audioError ?? "no DirectShow microphone found"));
+                audioDevice = audioDevices[0];
+            }
+            var effectiveDurationMs = Math.Clamp(durationMs, 250, 60_000);
+            var output = Path.Combine(Path.GetTempPath(), $"openclaw_camera_{Guid.NewGuid():N}.mp4");
+            try
+            {
+                var start = new ProcessStartInfo
+                {
+                    FileName = ffmpeg,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                ChildProcessSecurity.ScrubSensitiveEnvironment(start);
+                var arguments = new List<string>
+                {
+                    "-hide_banner", "-loglevel", "error", "-y", "-f", "dshow", "-i",
+                    includeAudio ? $"video={selected.Name}:audio={audioDevice}" : $"video={selected.Name}",
+                    "-t", (effectiveDurationMs / 1000d).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
+                    "-c:v", "libx264", "-preset", "veryfast",
+                };
+                if (includeAudio) arguments.AddRange(new[] { "-c:a", "aac", "-b:a", "128k" });
+                else arguments.Add("-an");
+                arguments.AddRange(new[] { "-movflags", "+faststart", output });
+                foreach (var arg in arguments) start.ArgumentList.Add(arg);
+                using var process = new Process { StartInfo = start };
+                process.Start();
+                var stdout = process.StandardOutput.ReadToEndAsync();
+                var stderr = process.StandardError.ReadToEndAsync();
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(effectiveDurationMs + 15_000);
+                try { await process.WaitForExitAsync(timeout.Token); }
+                catch (OperationCanceledException)
+                {
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                    throw;
+                }
+                _ = await stdout;
+                var error = await stderr;
+                if (process.ExitCode != 0 || !File.Exists(output)) throw new InvalidOperationException("CAMERA_UNAVAILABLE: " + error.Trim());
+                var bytes = await File.ReadAllBytesAsync(output, cancellationToken);
+                if (bytes.Length == 0) throw new InvalidOperationException("CAMERA_UNAVAILABLE: empty clip");
+                return (Convert.ToBase64String(bytes), effectiveDurationMs, includeAudio);
+            }
+            finally
+            {
+                try { if (File.Exists(output)) File.Delete(output); } catch { }
+            }
+        }
+
+        private async Task<string?> ResolvePreferredWinRtDeviceIdAsync(string facing, string? explicitDeviceId, CancellationToken cancellationToken)
         {
             if (!string.IsNullOrWhiteSpace(explicitDeviceId))
             {
                 return explicitDeviceId;
             }
 
-            var (devices, _) = await TryListDevicesWithWinRtAsync();
+            var (devices, _) = await TryListDevicesWithWinRtAsync(cancellationToken);
             if (devices.Length == 0)
             {
                 return null;
@@ -138,8 +214,8 @@ AAAAAAAAAAH/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAABP/9k=";
             try
             {
                 var (srcW, _) = TryReadJpegDimensions(jpegBytes);
-                var targetWidth = Math.Clamp(maxWidth ?? Math.Max(srcW, 1), 64, 8000);
-                var targetQuality = Math.Clamp(quality ?? 0.92, 0.1, 1.0);
+                var targetWidth = Math.Clamp(maxWidth ?? Math.Max(srcW, 1), 1, 8000);
+                var targetQuality = Math.Clamp(quality ?? 0.9, 0.05, 1.0);
                 var encoded = ImageEncoding.EncodeJpegBase64(jpegBytes, targetWidth, targetQuality);
                 if (string.IsNullOrWhiteSpace(encoded.Base64))
                 {
@@ -154,7 +230,7 @@ AAAAAAAAAAH/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAABP/9k=";
             }
         }
 
-        private static async Task<(CameraDeviceInfo[] Devices, string? Error)> TryListDevicesWithWinRtAsync()
+        private static async Task<(CameraDeviceInfo[] Devices, string? Error)> TryListDevicesWithWinRtAsync(CancellationToken cancellationToken)
         {
             var script = @"
 $ErrorActionPreference='Stop'
@@ -174,7 +250,7 @@ try {
 }
 ";
 
-            var res = await RunPowerShellAsync(script, null);
+            var res = await RunPowerShellAsync(script, null, cancellationToken);
             var output = (res.StdOut ?? string.Empty).Trim();
             var stderr = (res.StdErr ?? string.Empty).Trim();
 
@@ -226,7 +302,7 @@ try {
             }
         }
 
-        private static async Task<(byte[]? Bytes, string? Error)> TryCaptureWithWinRtAsync(string? deviceId)
+        private static async Task<(byte[]? Bytes, string? Error)> TryCaptureWithWinRtAsync(string? deviceId, CancellationToken cancellationToken)
         {
             var env = new Dictionary<string, string?> { ["OPENCLAW_CAMERA_DEVICEID"] = deviceId ?? string.Empty };
             var script = @"
@@ -269,7 +345,7 @@ try {
 }
 ";
 
-            var res = await RunPowerShellAsync(script, env);
+            var res = await RunPowerShellAsync(script, env, cancellationToken);
             var output = (res.StdOut ?? string.Empty).Trim();
             var stderr = (res.StdErr ?? string.Empty).Trim();
 
@@ -296,7 +372,7 @@ try {
             }
         }
 
-        private static async Task<string?> ResolveFfmpegPathAsync()
+        private static async Task<string?> ResolveFfmpegPathAsync(CancellationToken cancellationToken)
         {
             // 1) explicit override
             var env = Environment.GetEnvironmentVariable("OPENCLAW_FFMPEG_PATH");
@@ -322,7 +398,7 @@ try {
             }
 
             // 3) runtime resolution for dev environments (Get-Command often works even when `where` doesn't)
-            var cmd = await TryResolveFfmpegViaGetCommandAsync();
+            var cmd = await TryResolveFfmpegViaGetCommandAsync(cancellationToken);
             if (!string.IsNullOrWhiteSpace(cmd) && File.Exists(cmd))
             {
                 return cmd;
@@ -331,7 +407,7 @@ try {
             return null;
         }
 
-        private static async Task<string?> TryResolveFfmpegViaGetCommandAsync()
+        private static async Task<string?> TryResolveFfmpegViaGetCommandAsync(CancellationToken cancellationToken)
         {
             var script = @"
 $ErrorActionPreference='Stop'
@@ -344,15 +420,15 @@ try {
 }
 ";
 
-            var res = await RunPowerShellAsync(script, null);
+            var res = await RunPowerShellAsync(script, null, cancellationToken);
             if (res.ExitCode != 0) return null;
             var path = (res.StdOut ?? string.Empty).Trim();
             return string.IsNullOrWhiteSpace(path) ? null : path;
         }
 
-        private static async Task<(CameraDeviceInfo[] Devices, string? Error)> TryListDevicesWithFfmpegAsync(string ffmpegPath)
+        private static async Task<(CameraDeviceInfo[] Devices, string? Error)> TryListDevicesWithFfmpegAsync(string ffmpegPath, CancellationToken cancellationToken)
         {
-            var res = await RunProcessAsync(ffmpegPath, "-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy");
+            var res = await RunProcessAsync(ffmpegPath, new[] { "-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy" }, cancellationToken);
             var text = (res.StdErr ?? string.Empty) + "\n" + (res.StdOut ?? string.Empty);
             var names = ParseDshowVideoDeviceNames(text);
             if (names.Length == 0)
@@ -378,14 +454,26 @@ try {
             return (list, null);
         }
 
+        private static async Task<(string[] Devices, string? Error)> TryListAudioDevicesWithFfmpegAsync(string ffmpegPath, CancellationToken cancellationToken)
+        {
+            var res = await RunProcessAsync(ffmpegPath, new[] { "-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy" }, cancellationToken);
+            var text = (res.StdErr ?? string.Empty) + "\n" + (res.StdOut ?? string.Empty);
+            var names = ParseDshowAudioDeviceNames(text);
+            var error = names.Length == 0
+                ? (string.IsNullOrWhiteSpace(res.StdErr) ? "ffmpeg device list returned no audio devices" : res.StdErr.Trim())
+                : null;
+            return (names, error);
+        }
+
         private static async Task<(byte[]? Bytes, string? Error)> TryCaptureWithFfmpegAsync(
             string ffmpegPath,
             string facing,
             int? maxWidth,
             double? quality,
-            string? deviceId)
+            string? deviceId,
+            CancellationToken cancellationToken)
         {
-            var (devices, listErr) = await TryListDevicesWithFfmpegAsync(ffmpegPath);
+            var (devices, listErr) = await TryListDevicesWithFfmpegAsync(ffmpegPath, cancellationToken);
             if (devices.Length == 0)
             {
                 return (null, listErr ?? "ffmpeg camera device enumeration failed");
@@ -428,14 +516,14 @@ try {
                 }
 
                 args.Add(tempFile);
-                var res = await RunProcessAsync(ffmpegPath, args.ToArray());
+                var res = await RunProcessAsync(ffmpegPath, args.ToArray(), cancellationToken);
                 if (res.ExitCode != 0 || !File.Exists(tempFile))
                 {
                     var err = string.IsNullOrWhiteSpace(res.StdErr) ? "ffmpeg capture command failed" : res.StdErr.Trim();
                     return (null, err);
                 }
 
-                var bytes = await File.ReadAllBytesAsync(tempFile);
+                var bytes = await File.ReadAllBytesAsync(tempFile, cancellationToken);
                 if (!IsLikelyJpeg(bytes))
                 {
                     return (null, "ffmpeg capture produced non-JPEG output");
@@ -512,6 +600,39 @@ try {
             return names.ToArray();
         }
 
+        private static string[] ParseDshowAudioDeviceNames(string output)
+        {
+            var lines = output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            var names = new List<string>();
+            var typedQuoted = new Regex("\"([^\"]+)\"\\s*\\((video|audio)\\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+            foreach (var line in lines)
+            {
+                var match = typedQuoted.Match(line);
+                if (!match.Success || !string.Equals(match.Groups[2].Value, "audio", StringComparison.OrdinalIgnoreCase)) continue;
+                var name = match.Groups[1].Value.Trim();
+                if (!name.StartsWith("@device_", StringComparison.OrdinalIgnoreCase) && !names.Contains(name, StringComparer.OrdinalIgnoreCase)) names.Add(name);
+            }
+            if (names.Count > 0) return names.ToArray();
+
+            var inAudio = false;
+            var quoted = new Regex("\"([^\"]+)\"", RegexOptions.Compiled);
+            foreach (var line in lines)
+            {
+                if (line.Contains("DirectShow audio devices", StringComparison.OrdinalIgnoreCase))
+                {
+                    inAudio = true;
+                    continue;
+                }
+                if (!inAudio) continue;
+                var match = quoted.Match(line);
+                if (!match.Success) continue;
+                var name = match.Groups[1].Value.Trim();
+                if (name.StartsWith("@device_", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!names.Contains(name, StringComparer.OrdinalIgnoreCase)) names.Add(name);
+            }
+            return names.ToArray();
+        }
+
         private static string? ExtractMarkedError(string output)
         {
             const string mark = "__OC_ERR__";
@@ -560,7 +681,7 @@ try {
             return (0, 0);
         }
 
-        private static async Task<(int ExitCode, string StdOut, string StdErr)> RunProcessAsync(string fileName, params string[] args)
+        private static async Task<(int ExitCode, string StdOut, string StdErr)> RunProcessAsync(string fileName, string[] args, CancellationToken cancellationToken)
         {
             var psi = new ProcessStartInfo
             {
@@ -572,6 +693,7 @@ try {
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
             };
+            ChildProcessSecurity.ScrubSensitiveEnvironment(psi);
 
             foreach (var arg in args) psi.ArgumentList.Add(arg);
 
@@ -579,13 +701,18 @@ try {
             p.Start();
             var soTask = p.StandardOutput.ReadToEndAsync();
             var seTask = p.StandardError.ReadToEndAsync();
-            await p.WaitForExitAsync();
+            try { await p.WaitForExitAsync(cancellationToken); }
+            catch (OperationCanceledException)
+            {
+                try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+                throw;
+            }
             var so = await soTask;
             var se = await seTask;
             return (p.ExitCode, so, se);
         }
 
-        private static async Task<(int ExitCode, string StdOut, string StdErr)> RunPowerShellAsync(string script, IDictionary<string, string?>? env)
+        private static async Task<(int ExitCode, string StdOut, string StdErr)> RunPowerShellAsync(string script, IDictionary<string, string?>? env, CancellationToken cancellationToken)
         {
             var psi = new ProcessStartInfo
             {
@@ -597,6 +724,7 @@ try {
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
             };
+            ChildProcessSecurity.ScrubSensitiveEnvironment(psi);
 
             psi.ArgumentList.Add("-NoProfile");
             psi.ArgumentList.Add("-Sta");
@@ -616,7 +744,12 @@ try {
             p.Start();
             var soTask = p.StandardOutput.ReadToEndAsync();
             var seTask = p.StandardError.ReadToEndAsync();
-            await p.WaitForExitAsync();
+            try { await p.WaitForExitAsync(cancellationToken); }
+            catch (OperationCanceledException)
+            {
+                try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+                throw;
+            }
             var so = await soTask;
             var se = await seTask;
             return (p.ExitCode, so, se);

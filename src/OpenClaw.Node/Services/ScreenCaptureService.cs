@@ -218,7 +218,8 @@ namespace OpenClaw.Node.Services
             bool includeAudio,
             int screenIndex = 0,
             string captureApi = "auto",
-            bool lowLatency = false)
+            bool lowLatency = false,
+            CancellationToken cancellationToken = default)
         {
 #if WINDOWS
             if (!OperatingSystem.IsWindows())
@@ -241,7 +242,7 @@ namespace OpenClaw.Node.Services
             {
                 try
                 {
-                    var b64 = await RecordSingleAttemptAsync(durationMs, fps, includeAudio, screenIndex, attempt.CaptureApi, attempt.Hardware, attempt.LowLatency);
+                    var b64 = await RecordSingleAttemptAsync(durationMs, fps, includeAudio, screenIndex, attempt.CaptureApi, attempt.Hardware, attempt.LowLatency, cancellationToken);
                     return new ScreenRecordResult
                     {
                         Base64 = b64,
@@ -249,6 +250,10 @@ namespace OpenClaw.Node.Services
                         HardwareEncoding = attempt.Hardware,
                         LowLatency = attempt.LowLatency,
                     };
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -270,7 +275,8 @@ namespace OpenClaw.Node.Services
             int screenIndex,
             string captureApi,
             bool hardwareEncoding,
-            bool lowLatency)
+            bool lowLatency,
+            CancellationToken cancellationToken)
         {
             var outputPath = Path.Combine(Path.GetTempPath(), $"openclaw_screen_record_{Guid.NewGuid():N}.mp4");
             var completion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -314,40 +320,45 @@ namespace OpenClaw.Node.Services
                 }
             };
 
-            recorder.Record(outputPath);
-
-            using (var startTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(6)))
-            {
-                try
-                {
-                    await started.Task.WaitAsync(startTimeout.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                }
-            }
-
-            await Task.Delay(durationMs);
-            recorder.Stop();
-
-            string finalizedPath;
-            using (var completionTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12)))
-            {
-                finalizedPath = await completion.Task.WaitAsync(completionTimeout.Token);
-            }
-
-            var fileToRead = string.IsNullOrWhiteSpace(finalizedPath) ? outputPath : finalizedPath;
-
+            string? finalizedPath = null;
             try
             {
+                recorder.Record(outputPath);
+
+                using (var startTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                {
+                    startTimeout.CancelAfter(TimeSpan.FromSeconds(6));
+                    try
+                    {
+                        await started.Task.WaitAsync(startTimeout.Token);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                    }
+                }
+
+                await Task.Delay(durationMs, cancellationToken);
+                recorder.Stop();
+
+                using (var completionTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                {
+                    completionTimeout.CancelAfter(TimeSpan.FromSeconds(12));
+                    finalizedPath = await completion.Task.WaitAsync(completionTimeout.Token);
+                }
+
+                var fileToRead = string.IsNullOrWhiteSpace(finalizedPath) ? outputPath : finalizedPath;
                 var bytes = await File.ReadAllBytesAsync(fileToRead);
                 return Convert.ToBase64String(bytes);
             }
             finally
             {
-                if (File.Exists(fileToRead))
+                try { recorder.Stop(); } catch { }
+                foreach (var path in new[] { outputPath, finalizedPath })
                 {
-                    try { File.Delete(fileToRead); } catch { }
+                    if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                    {
+                        try { File.Delete(path); } catch { }
+                    }
                 }
             }
         }

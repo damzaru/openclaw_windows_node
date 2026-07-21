@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenClaw.Node.Protocol;
+using OpenClaw.Node.Services;
 using Xunit;
 
 namespace OpenClaw.Node.Tests
@@ -24,6 +25,7 @@ namespace OpenClaw.Node.Tests
             Assert.False(string.IsNullOrWhiteSpace(cfg.Url));
             Assert.False(string.IsNullOrWhiteSpace(cfg.Token));
 
+            var manifest = NodeCapabilityRegistry.Build(new CompanionSettings());
             var connectParams = new ConnectParams
             {
                 MinProtocol = Constants.GatewayProtocolVersion,
@@ -39,7 +41,8 @@ namespace OpenClaw.Node.Tests
                     { "instanceId", Guid.NewGuid().ToString("N") },
                     { "deviceFamily", "Windows" }
                 },
-                Commands = new System.Collections.Generic.List<string> { "system.notify", "system.which", "system.run", "screen.capture", "screen.list", "screen.record", "camera.list", "camera.snap", "window.list", "window.focus", "window.rect", "input.type", "input.key", "input.click", "input.scroll", "input.click.relative", "ui.find", "ui.click", "ui.type" },
+                Caps = new System.Collections.Generic.List<string>(manifest.Capabilities),
+                Commands = new System.Collections.Generic.List<string>(manifest.GatewayCommands),
                 Scopes = new System.Collections.Generic.List<string>(),
             };
 

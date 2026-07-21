@@ -1,538 +1,171 @@
-# OpenClaw Windows Companion Node
+# OpenClaw Windows Companion
 
-A Windows-native companion node for OpenClaw Gateway.
+A Windows tray companion for the OpenClaw Gateway. This implementation is aligned with the Gateway `2026.7.2` protocol baseline in `openclaw_source` and negotiates node protocol versions 3 through 4.
 
-It connects to your local OpenClaw gateway, exposes system/media/automation commands, supports tray-first operation (with onboarding UX).
+The Gateway source tree is a reference only. This repository does not modify it.
 
----
+## Current functionality
 
-## Table of Contents
+- Protocol 3–4 node WebSocket sessions with signed device-auth v3 payloads, plus protocol-v4 operator sidecars
+- Shared-token enrollment and per-Gateway, per-device, per-role device-token reconnects
+- Bounded frames, handshake/request timeouts, tick monitoring, reconnect jitter, and optional TLS SHA-256 pinning
+- Concurrent node invokes with timeouts, cancellation, ordered input, progress chunks, idempotency replay, and exactly one terminal result
+- Host-native Windows execution approvals with optimistic concurrency and fail-closed defaults
+- Device information/status, Windows location, screen snapshots/recording, camera capture, Canvas/A2UI, browser proxy, and Talk push-to-talk
+- Same-user authenticated Named Pipe compatibility surface for legacy window/input automation
+- Tray settings, diagnostics, onboarding, restart/exit, and optional start-at-login
+- DPAPI-protected companion settings, device identity, device tokens, and IPC credential
 
-- [1) What this project is](#1-what-this-project-is)
-- [2) Feature list](#2-feature-list)
-- [3) Requirements](#3-requirements)
-- [4) Configuration (Gateway + Node)](#4-configuration-gateway--node)
-- [5) Build, version, reload, and deploy](#5-build-version-reload-and-deploy)
-- [6) Browser runtime and remote browser behavior](#6-browser-runtime-and-remote-browser-behavior)
-- [7) Initial setup and pairing](#7-initial-setup-and-pairing)
-- [8) Usage examples](#8-usage-examples)
-- [9) Project structure and architecture](#9-project-structure-and-architecture)
-- [10) Troubleshooting](#10-troubleshooting)
-- [11) Security and privacy notes](#11-security-and-privacy-notes)
-- [12) Testing](#12-testing)
-- [13) Known limitations](#13-known-limitations)
+## Gateway command surface
 
----
+The companion uses one registry for both its connect manifest and command dispatch. A handler is not Gateway-reachable unless the registry advertises it.
 
-## 1) What this project is
+Enabled by default:
 
-Contains the Windows port of the OpenClaw node runtime.
-
-At a high level, it provides:
-
-- **Gateway connection + protocol handling**
-- **Node command execution** (`system.run`, media, automation, etc.)
-- **Local IPC bridge** via Named Pipes (Windows)
-- **Discovery beacons** on LAN
-- **Tray UX + onboarding flow** for non-console user experience
-
-This project is intended to run next to OpenClaw Gateway and be controlled by OpenClaw sessions/tools.
-
----
-
-## 2) Feature list
-
-### Core connectivity
-
-- Gateway WebSocket handshake flow (`connect.challenge` → `connect` → `hello-ok`)
-- Signed device identity payload in connect flow
-- Exponential reconnect backoff + tick monitor
-- Connection rejection handling with tray-visible/auth dialogs
-
-### Gateway method handlers (core)
-
-- `status`
-- `health`
-- `set-heartbeats`
-- `system-event`
-- `channels.status`
-- `config.get`, `config.set`, `config.patch`, `config.schema`
-- Pairing request handlers:
-  - `node.pair.list`, `node.pair.approve`, `node.pair.reject`
-  - `device.pair.list`, `device.pair.approve`, `device.pair.reject`
-
-### Node invoke commands
-
-- System:
-  - `system.run`
-  - `system.which`
-  - `system.notify`
-- Browser:
-  - `browser.proxy` (node-owned bundled DevTools MCP backend)
-  - Chrome-first managed browser launch with reuse of an already-running DevTools session when present
-- Screen/camera:
-  - `screen.list`
-  - `screen.capture`
-  - `screen.record`
-  - `camera.list`
-  - `camera.snap`
-- Window/input automation:
-  - `window.list`, `window.focus`, `window.rect`
-  - `input.type`, `input.key`, `input.click`, `input.scroll`, `input.click.relative`
-  - `ui.find`, `ui.click`, `ui.type`
-
-### IPC server (Windows)
-
-Named Pipe endpoint with auth support:
-
-- `\\.\pipe\openclaw.node.ipc`
-- Methods include `ipc.ping` plus window/input methods
-- Per-request timeout (`params.timeoutMs`) with explicit `TIMEOUT` errors
-
-### Discovery
-
-- UDP multicast beacon announcements (`openclaw.node.discovery.v1`)
-- Periodic + reconnect-triggered announcements with jitter/throttling
-- In-memory discovered-node index with stale-entry expiry
-
-### Tray UX (Windows)
-
-- Default mode on Windows (unless `--no-tray`)
-- Custom lobster tray icon
-- Menu actions:
-  - Open Logs
-  - Open Config File
-  - Copy Diagnostics
-  - Restart Node
-  - Exit
-- Live status section:
-  - State
-  - Pending pairs
-  - Last reconnect duration
-  - Onboarding status
-- Onboarding and auth dialogs (OK-button MessageBox)
-
----
-
-## 3) Requirements
-
-### Runtime requirements
-
-- **Windows 10/11** (recommended for tray and automation)
-- **.NET SDK 8.0**
-- Running **OpenClaw Gateway** with valid token
-
-### Optional but recommended
-
-- `ffmpeg` available (fallback path for some media flows)
-- Camera privacy settings enabled for desktop apps (if camera features are used)
-
----
-
-## 4) Configuration (Gateway + Node)
-
-Node resolves gateway connection values in this order:
-
-1. CLI args
-   - `--gateway-url`
-   - `--gateway-token`
-2. Environment variables
-   - `OPENCLAW_GATEWAY_URL`
-   - `OPENCLAW_GATEWAY_TOKEN`
-3. OpenClaw config file
-   - `~/.openclaw/openclaw.json`
-
-### Minimal gateway config example
-
-```json
-{
-  "gateway": {
-    "host": "127.0.0.1",
-    "port": 18789,
-    "auth": {
-      "token": "REPLACE_WITH_REAL_TOKEN"
-    }
-  }
-}
-```
-
-### Gateway node command allowlist example (recommended)
-
-Use Gateway-side command policy to explicitly allow only the node commands you want exposed.
-
-```json
-{
-  "gateway": {
-    "port": 18789,
-    "auth": {
-      "token": "REPLACE_WITH_REAL_TOKEN"
-    },
-    "nodes": {
-      "allowCommands": [
-        "system.notify",
-        "system.which",
-        "system.run",
-        "browser.proxy",
-        "screen.capture",
-        "screen.list",
-        "screen.record",
-        "camera.list",
-        "camera.snap",
-        "window.list",
-        "window.focus",
-        "window.rect",
-        "input.type",
-        "input.key",
-        "input.click",
-        "input.scroll",
-        "input.click.relative",
-        "ui.find",
-        "ui.click",
-        "ui.type"
-      ],
-      "denyCommands": [
-        "contacts.*",
-        "calendar.*",
-        "sms.*"
-      ]
-    }
-  }
-}
-```
-
-> If your gateway version uses a slightly different schema, keep the same intent: explicit allowlist for node commands and explicit denylist for high-risk surfaces.
-
-### Notes on config fields
-
-- `gateway.host`: gateway host/IP used by node (default `127.0.0.1`)
-- `gateway.port`: gateway WebSocket port used by node (`ws://<host>:<port>/`)
-- `gateway.auth.token`: shared auth token for gateway connect
-- `gateway.nodes.allowCommands`: explicit list of node command names the gateway will permit
-- `gateway.nodes.denyCommands`: deny patterns for commands you want blocked even if broadly allowed
-
-If token/config are missing/invalid in tray mode, app stays alive and guides recovery (dialog + tray onboarding status + Open Config menu action).
-
----
-
-## 5) Build, version, reload, and deploy
-
-### Canonical workflow
-
-Use the scripts in `scripts/` instead of inventing ad-hoc build/deploy flows.
-
-Recommended sequence for runtime-visible node changes:
-
-1. bump the runtime-visible build label
-2. inspect local preflight state
-3. rebuild/reload the canonical Windows output
-4. deploy that canonical output to ROG17 only if needed
-
-### Runtime-visible build label
-
-The tray and several runtime surfaces use:
-
-- `src/OpenClaw.Node/BuildInfo.cs`
-
-Specifically:
-
-- `BuildInfo.BuildVersion` (for example `b0029`)
-
-That build label is the first thing to bump when you want an easy runtime verification point.
-
-### Canonical scripts
-
-#### Bump build label
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bump-build.ps1 -RepoPath .
-```
-
-#### Preflight local state
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-preflight.ps1 -RepoPath .
-```
-
-#### Reload local Windows node from canonical output
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-reload.ps1 -RepoPath . -NoPull
-```
-
-#### Deploy canonical build to ROG17 from WSL/bash
-
-```bash
-./scripts/deploy-rog17-node.sh
-```
-
-### Build targets
-
-- `net8.0` (cross-platform/dev target)
-- `net8.0-windows` (Windows Forms tray target; built on Windows, `WinExe` output so no console window)
-
-### Canonical build output
-
-The canonical Windows build output is:
-
-```text
-src/OpenClaw.Node/bin/x64/Debug/net8.0-windows/
-```
-
-Do not silently switch to alternate output folders. If the canonical path is blocked/locked, stop and choose the next step deliberately.
-
-### Direct build (when needed)
-
-From `src`:
-
-```bash
-cd <repo-root>/src
-dotnet build OpenClaw.Node/OpenClaw.Node.csproj -p:Platform=x64 -f net8.0-windows
-```
-
-### Run (direct)
-
-```bash
-cd <repo-root>/src/OpenClaw.Node
-dotnet run -p:Platform=x64 -f net8.0-windows -- --gateway-url ws://{gateway_ip}:18789 --gateway-token <TOKEN>
-```
-
-### Tray/headless behavior
-
-- On Windows, tray mode is default.
-- Use `--no-tray` for headless behavior.
-- Use `--tray` to force tray mode explicitly.
-
----
-
-## 6) Browser runtime and remote browser behavior
-
-### Browser backend model
-
-The Windows node owns browser automation through:
-
+- `system.run.prepare`, `system.run`, `system.which`
+- `system.execApprovals.get`, `system.execApprovals.set`
+- `system.notify`, `fs.listDir`
 - `browser.proxy`
-- a **bundled** `chrome-devtools-mcp` backend
-- a **bundled** Node runtime
+- `screen.snapshot`
+- `camera.list`
+- `device.info`, `device.status`
+- `canvas.present`, `canvas.hide`, `canvas.navigate`, `canvas.eval`, `canvas.snapshot`
+- `canvas.a2ui.push`, `canvas.a2ui.pushJSONL`, `canvas.a2ui.reset`
 
-The target machine should not need system `node`, `npm`, or `npx` for browser support.
+Explicit opt-in in Settings:
 
-### Bundled browser runtime
+- `screen.record`
+- `camera.snap`, `camera.clip`
+- `location.get`
+- `talk.ptt.start`, `talk.ptt.stop`, `talk.ptt.cancel`, `talk.ptt.once`
 
-Bundled browser runtime files live under:
+The companion does not advertise `mcp.tools.call.v1` or `agent.cli.claude.run.v1`, because it does not ship those optional runtimes.
 
-```text
-src/OpenClaw.Node/browser-runtime/
-```
+Legacy commands such as `screen.capture`, `screen.list`, `window.*`, `input.*`, `ui.*`, and `system.describe` are not declared to or accepted from the Gateway. Supported compatibility automation is confined to authenticated `ipc.*` methods on the same-user Named Pipe.
 
-They are copied into the built/published node output under:
+## Requirements
 
-```text
-runtimes/browser/
-```
+- Windows 10 or 11
+- .NET 8 SDK to build
+- A reachable OpenClaw Gateway with a valid shared token for first enrollment, or a previously stored device token
+- `ffmpeg` on `PATH` for camera video clips
+- Windows camera, microphone, and location permissions for the corresponding opt-in features
 
-Current packaged pieces include:
+Builds target x64. The Windows UI/tray artifact uses `net8.0-windows`; `net8.0` exists for protocol and service tests.
 
-- bundled `node.exe`
-- bundled `chrome-devtools-mcp`
-- `versions.json` for pinned runtime metadata
+## Configuration
 
-Refresh the bundle with:
+On Windows, use the tray menu's **Settings...** entry. Saving settings restarts the companion.
 
-```bash
-./scripts/vendor-browser-runtime.sh
-```
+Connection values resolve in this order:
 
-### Browser launch behavior
+1. `--gateway-url` and `--gateway-token`
+2. `OPENCLAW_GATEWAY_URL` and `OPENCLAW_GATEWAY_TOKEN`
+3. DPAPI-protected companion settings
+4. Read-only legacy import from `~/.openclaw/openclaw.json`
 
-Current intent/behavior:
+CLI and environment tokens are transient and are not copied into the secure settings store. On first use, a token found only in the legacy config may be imported once. The Gateway source/config is never edited.
 
-1. probe `http://127.0.0.1:9222/json/version`
-2. if a valid DevTools endpoint already exists, attach to it
-3. otherwise discover a supported local browser
-4. launch a managed browser profile with remote debugging enabled
-5. serve browser actions through the bundled MCP backend
+After a successful enrollment, the Gateway-issued device token is endpoint-, identity-, and role-bound. The companion can reconnect with it after the shared token is removed; invalid stored tokens are cleared and require fresh enrollment.
 
-### Browser preference
+For a remote `wss://` Gateway, Settings accepts an optional SHA-256 certificate pin. When configured, the presented certificate must match that pin.
 
-Current discovery order is Chrome-first:
-
-1. Google Chrome
-2. Microsoft Edge
-
-The validated target behavior is:
-
-- prefer **Chrome** when launching a new managed browser session from a clean state
-- reuse an already-running valid DevTools session when available
-
-### Notes
-
-- Chromium-compatible browsers can expose the same DevTools Protocol, but product intent here is Chrome-first.
-- Fixed-port assumptions around `9222` require validation against a **real** DevTools endpoint, not just “something is listening”.
-
----
-
-## 7) Initial setup and pairing
-
-1. Ensure gateway is running and reachable on the configured `gateway.host` IP/name (default is `127.0.0.1`).
-2. Ensure token is available via CLI/env/config.
-3. Start node.
-4. Confirm node appears connected in OpenClaw node status.
-5. Approve pairing requests if required by your gateway policy.
-
-### If token/config is missing
-
-- Tray starts in onboarding state
-- Dialog explains what to fix
-- Use **Open Config File** in tray menu, save token, then **Restart Node**
-
----
-
-## 8) Usage examples
-
-### Example A — run node with explicit token
-
-```bash
-dotnet run -p:Platform=x64 -- --gateway-url ws://{gateway_ip}:18789 --gateway-token <TOKEN>
-```
-
-### Example B — run with config fallback only
-
-```bash
-dotnet run -p:Platform=x64
-```
-
-(Requires valid `~/.openclaw/openclaw.json`.)
-
-### Example C — headless run
-
-```bash
-dotnet run -p:Platform=x64 -- --no-tray
-```
-
----
-
-## 9) Project structure and architecture
-
-## Folder map
+Companion-owned data is stored under:
 
 ```text
-src/
-├── OpenClaw.sln
-├── OpenClaw.Node/
-│   ├── Program.cs
-│   ├── OpenClaw.Node.csproj
-│   ├── Protocol/
-│   │   ├── GatewayConnection.cs
-│   │   ├── GatewayModels.cs
-│   │   └── BridgeModels.cs
-│   ├── Services/
-│   │   ├── CoreMethodService.cs
-│   │   ├── NodeCommandExecutor.cs
-│   │   ├── IpcPipeServerService.cs
-│   │   ├── DiscoveryService.cs
-│   │   ├── DeviceIdentityService.cs
-│   │   ├── ScreenCaptureService.cs
-│   │   ├── CameraCaptureService.cs
-│   │   └── AutomationService.cs
-│   └── Tray/
-│       ├── WindowsNotifyIconTrayHost.cs
-│       ├── TrayStatusBroadcaster.cs
-│       ├── OnboardingAdvisor.cs
-│       └── Assets/openclaw-claw.ico
-└── OpenClaw.Node.Tests/
-    ├── *Tests.cs
-    └── OpenClaw.Node.Tests.csproj
+%LOCALAPPDATA%\OpenClaw Companion\
 ```
 
-## Architecture (high-level)
+Secrets and identities use Windows DPAPI with `CurrentUser` scope. The native execution policy is a non-secret JSON file in the same directory and is written atomically.
 
-1. **Program bootstrap**
-   - resolves config/token
-   - builds service graph
-   - wires tray events + onboarding
-2. **GatewayConnection**
-   - handles websocket lifecycle + protocol frames
-   - dispatches methods/events
-   - reconnect/tick resilience
-3. **CoreMethodService**
-   - handles gateway methods and pairing state
-4. **NodeCommandExecutor**
-   - executes node invoke commands
-   - delegates to media/automation services
-5. **IpcPipeServerService**
-   - local named-pipe surface for host integration
-6. **DiscoveryService**
-   - multicast beacon send/listen/index
-7. **Tray layer**
-   - tray host abstraction and Windows implementation
-   - onboarding state/advice and user diagnostics
+## Execution approvals
 
----
+`system.run` is deny-by-default. The Windows-native contract returned by `system.execApprovals.get` is:
 
-## 10) Troubleshooting
-
-### App exits immediately
-
-- If running without tray (`--no-tray`) and no token is configured, app exits by design.
-- In default Windows tray mode, it should stay alive and show setup guidance.
-
-### No tray icon visible
-
-- Ensure Windows target build exists (`net8.0-windows`)
-- Rebuild and restart node
-
-### “Authentication failed” dialog
-
-- Token likely invalid/mismatched
-- Open Config File from tray
-- verify `gateway.auth.token`
-- restart node
-
-### Camera snapshot fails
-
-- Check Windows camera privacy permissions
-- verify camera device exists (`camera.list`)
-- optionally verify ffmpeg availability if fallback expected
-
-### Gateway unreachable
-
-- verify gateway service status
-- verify local port and URL
-- confirm no firewall/network policy blocks the configured gateway host/IP websocket
-
----
-
-## 11) Security and privacy notes
-
-- Do **not** commit real tokens, keys, PATs, or personal local paths.
-- Keep secrets in local env/config (ignored from source control).
-- Use placeholders in docs and scripts where possible.
-- Review logs before sharing externally (logs may include environment-specific info).
-
----
-
-## 12) Testing
-
-Run all tests:
-
-```bash
-cd <repo-root>/src
-dotnet test OpenClaw.Node.Tests/OpenClaw.Node.Tests.csproj -p:Platform=x64
+```json
+{
+  "enabled": true,
+  "hash": "sha256:...",
+  "baseHash": "sha256:...",
+  "defaultAction": "deny",
+  "rules": [],
+  "constraints": {
+    "baseHashRequired": true,
+    "defaultAllowAllowed": false,
+    "broadAllowRulesAllowed": false,
+    "dangerousAllowRulesAllowed": false
+  }
+}
 ```
 
-Run real-gateway integration subset (opt-in):
+Updates are full replacements with `defaultAction`, `rules`, and the last observed `baseHash`. Stale writes are rejected. `prompt` fails closed when there is no active local approval UI. Default allow, wildcard executables, and allow rules for shells/loaders such as `cmd`, PowerShell, `mshta`, or `rundll32` are rejected.
 
-```bash
-cd <repo-root>/src
-RUN_REAL_GATEWAY_INTEGRATION=1 dotnet test OpenClaw.Node.Tests/OpenClaw.Node.Tests.csproj -p:Platform=x64 --filter "FullyQualifiedName~RealGatewayIntegrationTests"
+Only a non-empty string array is accepted for `system.run.params.command`. Prepared plans are revalidated before execution, sensitive inherited environment variables are removed, forwarded environment overrides are restricted, stdout/stderr share a 200,000-character cap, and timeout/cancellation kills the process tree.
+
+## Local IPC
+
+The compatibility server listens on:
+
+```text
+\\.\pipe\openclaw.node.ipc
 ```
 
----
+It uses `PipeOptions.CurrentUserOnly`, a random DPAPI-protected 256-bit credential, fixed-time credential comparison, request timeouts, and bounded method behavior. Production methods are:
 
-## 13) Known limitations
+- `ipc.ping`
+- `ipc.window.list`, `ipc.window.focus`, `ipc.window.rect`
+- `ipc.input.type`, `ipc.input.key`, `ipc.input.click`, `ipc.input.scroll`, `ipc.input.click.relative`
 
-- Some automation/media behavior is host and permission dependent.
-- `net8.0-windows` target is intended for Windows hosts (tray/UI path).
-- Discovery currently uses in-memory index (no persisted discovery DB).
+These methods are not part of the Gateway command manifest.
 
----
+Same-user compatibility clients read `%LOCALAPPDATA%\OpenClaw Companion\ipc-credential.dat`, decrypt it with Windows DPAPI `CurrentUser` scope and the `OpenClaw.Windows.Companion.v2` optional entropy, and send the resulting credential as the top-level `authToken` on every request. The path follows `OPENCLAW_WINDOWS_HOME` when that test/development override is set.
+
+## Build and test
+
+Restore and run the full test suite:
+
+```powershell
+dotnet restore .\src\OpenClaw.sln
+dotnet test .\src\OpenClaw.Node.Tests\OpenClaw.Node.Tests.csproj --no-restore -p:Platform=x64
+```
+
+Build the Windows companion:
+
+```powershell
+dotnet build .\src\OpenClaw.Node\OpenClaw.Node.csproj --no-restore -p:Platform=x64 -f net8.0-windows
+```
+
+The canonical debug output is:
+
+```text
+src\OpenClaw.Node\bin\x64\Debug\net8.0-windows\
+```
+
+Run directly:
+
+```powershell
+dotnet run --project .\src\OpenClaw.Node\OpenClaw.Node.csproj -p:Platform=x64 -f net8.0-windows -- --gateway-url ws://127.0.0.1:18789 --gateway-token TOKEN
+```
+
+Windows starts in tray mode by default. Use `--no-tray` for a headless process or `--tray` to force tray mode.
+
+Repository scripts in `scripts/` remain the canonical workflow for build-label bumps, local reloads, preflight checks, and deployment.
+
+## Architecture
+
+- `Protocol/GatewayConnection.cs`: Gateway session, auth, request correlation, invoke lifecycle
+- `Services/NodeCapabilityRegistry.cs`: canonical advertised/dispatchable command surface
+- `Services/NodeCommandExecutor.cs`: current Gateway command handlers and execution hardening
+- `Services/ExecApprovalsStore.cs`: host-native Windows approval contract
+- `Services/SecureStore.cs`: CurrentUser-DPAPI persistence and atomic writes
+- `Services/CanvasService.cs`: Canvas/A2UI window and capture
+- `Services/TalkPushToTalkService.cs`: Windows speech capture and operator-sidecar `chat.send`
+- `Services/IpcPipeServerService.cs`: same-user local compatibility bridge
+- `Tray/CompanionSettingsDialog.cs`: settings, sensitive-feature confirmation, start-at-login
+
+## Known limitations
+
+- Canvas uses Microsoft Edge WebView2 and requires the evergreen WebView2 Runtime. A2UI is loaded from the Gateway's capability-scoped `canvas` plugin surface; capability URLs are refreshed through `node.pluginSurface.refresh`, and UI actions are forwarded only from the exact trusted A2UI document.
+- Camera clips use `ffmpeg` DirectShow. Requests with `includeAudio: true` capture the first available DirectShow microphone and fail clearly when no microphone is available.
+- Talk transcription uses Windows `System.Speech`; recognition quality and language availability depend on installed Windows speech components.
+- ARM64 packaging, WSL provisioning, a full Command Center/chat UI, an updater, and local MCP/Claude runtimes are not included.

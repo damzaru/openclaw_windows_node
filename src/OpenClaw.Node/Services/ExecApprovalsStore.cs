@@ -6,322 +6,325 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace OpenClaw.Node.Services
 {
+    /// <summary>
+    /// Windows-owned execution policy. This intentionally implements the
+    /// Gateway host-native contract rather than the Gateway's file-backed
+    /// ~/.openclaw/exec-approvals.json format.
+    /// </summary>
     internal static class ExecApprovalsStore
     {
-        private static readonly JsonSerializerOptions JsonOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            WriteIndented = true,
-            PropertyNameCaseInsensitive = true,
-        };
+        internal const string Deny = "deny";
+        internal const string Allow = "allow";
+        internal const string Prompt = "prompt";
 
-        internal sealed class ExecApprovalsSocket
+        internal sealed class NativeRule
         {
-            public string? Path { get; set; }
-            public string? Token { get; set; }
-        }
-
-        internal class ExecApprovalsDefaults
-        {
-            public string? Security { get; set; }
-            public string? Ask { get; set; }
-            public string? AskFallback { get; set; }
-            public bool? AutoAllowSkills { get; set; }
-        }
-
-        internal sealed class ExecAllowlistEntry
-        {
-            public string? Id { get; set; }
             public string Pattern { get; set; } = string.Empty;
-            public long? LastUsedAt { get; set; }
-            public string? LastUsedCommand { get; set; }
-            public string? LastResolvedPath { get; set; }
+            public string Action { get; set; } = Deny;
+            public List<string>? Shells { get; set; }
+            public string? Description { get; set; }
+            public bool? Enabled { get; set; }
         }
 
-        internal sealed class ExecApprovalsAgent : ExecApprovalsDefaults
+        internal sealed class NativePolicy
         {
-            public List<ExecAllowlistEntry>? Allowlist { get; set; }
+            public string? DefaultAction { get; set; }
+            public List<NativeRule> Rules { get; set; } = new();
         }
 
-        internal sealed class ExecApprovalsFile
+        private sealed class StoredPolicy
         {
             public int Version { get; set; } = 1;
-            public ExecApprovalsSocket? Socket { get; set; }
-            public ExecApprovalsDefaults? Defaults { get; set; }
-            public Dictionary<string, ExecApprovalsAgent>? Agents { get; set; }
+            public string DefaultAction { get; set; } = Deny;
+            public List<NativeRule> Rules { get; set; } = new();
         }
 
-        internal sealed class ExecApprovalsSnapshot
+        internal sealed class NativeSnapshot
         {
-            public string Path { get; set; } = string.Empty;
-            public bool Exists { get; set; }
-            public string Hash { get; set; } = string.Empty;
-            public string? Raw { get; set; }
-            public ExecApprovalsFile File { get; set; } = new();
+            public bool Enabled { get; init; } = true;
+            public string Hash { get; init; } = string.Empty;
+            public string BaseHash { get; init; } = string.Empty;
+            public string DefaultAction { get; init; } = Deny;
+            public List<NativeRule> Rules { get; init; } = new();
+            public object Constraints { get; init; } = BuildConstraints();
         }
 
-        internal sealed class ExecApprovalsSetParams
+        internal sealed class NativeSetParams
         {
-            public ExecApprovalsFile? File { get; set; }
+            public string? DefaultAction { get; set; }
+            public List<NativeRule>? Rules { get; set; }
             public string? BaseHash { get; set; }
         }
 
-        public static ExecApprovalsSnapshot ReadSnapshot()
+        internal sealed record Decision(string Action, NativeRule? Rule, string Shell);
+
+        private static readonly object Gate = new();
+        private static readonly JsonSerializerOptions JsonOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            WriteIndented = true,
+        };
+
+        private static readonly HashSet<string> SupportedShells = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "direct", "cmd", "powershell", "pwsh",
+        };
+
+        private static readonly HashSet<string> DangerousAllowExecutables = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe",
+            "wscript", "wscript.exe", "cscript", "cscript.exe", "mshta", "mshta.exe",
+            "rundll32", "rundll32.exe", "regsvr32", "regsvr32.exe", "certutil", "certutil.exe",
+        };
+
+        public static NativeSnapshot ReadSnapshot()
+        {
+            lock (Gate)
+            {
+                var policy = ReadPolicyUnsafe();
+                return ToSnapshot(policy);
+            }
+        }
+
+        public static NativeSnapshot Save(NativePolicy incoming, string? baseHash)
+        {
+            lock (Gate)
+            {
+                var current = ReadPolicyUnsafe();
+                var currentSnapshot = ToSnapshot(current);
+                if (string.IsNullOrWhiteSpace(baseHash))
+                {
+                    throw new InvalidOperationException("INVALID_REQUEST: exec approvals base hash required; reload and retry");
+                }
+                if (!string.Equals(baseHash.Trim(), currentSnapshot.Hash, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("INVALID_REQUEST: exec approvals changed; reload and retry");
+                }
+
+                var next = NormalizeAndValidate(incoming, current.DefaultAction);
+                WritePolicyUnsafe(next);
+                return ToSnapshot(next);
+            }
+        }
+
+        public static object ToPayload(NativeSnapshot snapshot) => new
+        {
+            enabled = true,
+            hash = snapshot.Hash,
+            baseHash = snapshot.Hash,
+            defaultAction = snapshot.DefaultAction,
+            rules = snapshot.Rules,
+            constraints = snapshot.Constraints,
+        };
+
+        public static NativeSetParams DecodeSetParams(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return new NativeSetParams();
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException("INVALID_REQUEST: exec approvals policy must be an object");
+            }
+            var allowed = new HashSet<string>(new[] { "defaultAction", "rules", "baseHash" }, StringComparer.Ordinal);
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (!allowed.Contains(property.Name))
+                    throw new InvalidOperationException($"INVALID_REQUEST: unknown exec approvals field: {property.Name}");
+            }
+            if (document.RootElement.TryGetProperty("rules", out var rules))
+            {
+                if (rules.ValueKind != JsonValueKind.Array)
+                    throw new InvalidOperationException("INVALID_REQUEST: exec approvals rules must be an array");
+                var allowedRuleFields = new HashSet<string>(new[] { "pattern", "action", "shells", "description", "enabled" }, StringComparer.Ordinal);
+                var index = 0;
+                foreach (var rule in rules.EnumerateArray())
+                {
+                    index++;
+                    if (rule.ValueKind != JsonValueKind.Object)
+                        throw new InvalidOperationException($"INVALID_REQUEST: rule {index} must be an object");
+                    foreach (var property in rule.EnumerateObject())
+                    {
+                        if (!allowedRuleFields.Contains(property.Name))
+                            throw new InvalidOperationException($"INVALID_REQUEST: unknown exec approvals rule field: {property.Name}");
+                    }
+                }
+            }
+            return JsonSerializer.Deserialize<NativeSetParams>(json, JsonOptions) ?? new NativeSetParams();
+        }
+
+        public static Decision Evaluate(string commandText, IReadOnlyList<string> argv)
+        {
+            var snapshot = ReadSnapshot();
+            var shell = ResolveShell(argv.Count > 0 ? argv[0] : string.Empty);
+            foreach (var rule in snapshot.Rules)
+            {
+                if (rule.Enabled == false) continue;
+                if (rule.Shells is { Count: > 0 } && !rule.Shells.Contains(shell, StringComparer.OrdinalIgnoreCase)) continue;
+                if (RuleMatches(rule.Pattern, commandText, argv)) return new Decision(rule.Action, rule, shell);
+            }
+            return new Decision(snapshot.DefaultAction, null, shell);
+        }
+
+        private static StoredPolicy ReadPolicyUnsafe()
         {
             var path = ResolvePath();
-            if (!File.Exists(path))
-            {
-                return new ExecApprovalsSnapshot
-                {
-                    Path = path,
-                    Exists = false,
-                    Raw = null,
-                    Hash = HashRaw(null),
-                    File = Normalize(new ExecApprovalsFile()),
-                };
-            }
-
-            var raw = File.ReadAllText(path, Encoding.UTF8);
-            ExecApprovalsFile? parsed = null;
+            if (!File.Exists(path)) return new StoredPolicy();
             try
             {
-                parsed = JsonSerializer.Deserialize<ExecApprovalsFile>(raw, JsonOptions);
+                var parsed = JsonSerializer.Deserialize<StoredPolicy>(File.ReadAllText(path, Encoding.UTF8), JsonOptions);
+                return parsed == null
+                    ? new StoredPolicy()
+                    : NormalizeAndValidate(new NativePolicy { DefaultAction = parsed.DefaultAction, Rules = parsed.Rules }, Deny);
             }
             catch
             {
-                parsed = null;
-            }
-
-            return new ExecApprovalsSnapshot
-            {
-                Path = path,
-                Exists = true,
-                Raw = raw,
-                Hash = HashRaw(raw),
-                File = Normalize(parsed ?? new ExecApprovalsFile()),
-            };
-        }
-
-        public static ExecApprovalsSnapshot Save(ExecApprovalsFile incoming, string? baseHash)
-        {
-            var current = ReadSnapshot();
-            RequireBaseHash(baseHash, current);
-
-            var normalized = Normalize(incoming);
-            normalized.Socket = MergeSocket(normalized.Socket, current.File.Socket);
-
-            var path = current.Path;
-            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path) ?? ResolveBaseDir());
-            var raw = JsonSerializer.Serialize(normalized, JsonOptions);
-            File.WriteAllText(path, raw + Environment.NewLine, Encoding.UTF8);
-            return ReadSnapshot();
-        }
-
-        public static object ToPayload(ExecApprovalsSnapshot snapshot)
-        {
-            return new
-            {
-                path = snapshot.Path,
-                exists = snapshot.Exists,
-                hash = snapshot.Hash,
-                file = Redact(snapshot.File),
-            };
-        }
-
-        public static ExecApprovalsSetParams DecodeSetParams(string? json)
-        {
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                return new ExecApprovalsSetParams();
-            }
-            return JsonSerializer.Deserialize<ExecApprovalsSetParams>(json, JsonOptions) ?? new ExecApprovalsSetParams();
-        }
-
-        private static string ResolveBaseDir()
-        {
-            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            return System.IO.Path.Combine(home, ".openclaw");
-        }
-
-        private static string ResolvePath() => System.IO.Path.Combine(ResolveBaseDir(), "exec-approvals.json");
-
-        private static string HashRaw(string? raw)
-        {
-            using var sha = SHA256.Create();
-            var bytes = Encoding.UTF8.GetBytes(raw ?? string.Empty);
-            return Convert.ToHexString(sha.ComputeHash(bytes)).ToLowerInvariant();
-        }
-
-        private static void RequireBaseHash(string? baseHash, ExecApprovalsSnapshot snapshot)
-        {
-            if (!snapshot.Exists)
-            {
-                return;
-            }
-            if (string.IsNullOrWhiteSpace(snapshot.Hash))
-            {
-                throw new InvalidOperationException("INVALID_REQUEST: exec approvals base hash unavailable; reload and retry");
-            }
-            var trimmed = baseHash?.Trim() ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(trimmed))
-            {
-                throw new InvalidOperationException("INVALID_REQUEST: exec approvals base hash required; reload and retry");
-            }
-            if (!string.Equals(trimmed, snapshot.Hash, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("INVALID_REQUEST: exec approvals changed; reload and retry");
+                // Corrupt or unsafe state is never interpreted as permission.
+                return new StoredPolicy();
             }
         }
 
-        private static ExecApprovalsSocket? MergeSocket(ExecApprovalsSocket? incoming, ExecApprovalsSocket? current)
+        private static void WritePolicyUnsafe(StoredPolicy policy)
         {
-            var path = (incoming?.Path ?? current?.Path)?.Trim();
-            var token = (incoming?.Token ?? current?.Token)?.Trim();
-            if (string.IsNullOrWhiteSpace(path) && string.IsNullOrWhiteSpace(token))
+            var path = ResolvePath();
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(policy, JsonOptions) + Environment.NewLine);
+            SecureStore.AtomicWrite(path, bytes);
+        }
+
+        private static StoredPolicy NormalizeAndValidate(NativePolicy incoming, string currentDefault)
+        {
+            if (incoming.Rules == null) throw new InvalidOperationException("INVALID_REQUEST: exec approvals rules are required");
+            if (incoming.Rules.Count > 512) throw new InvalidOperationException("INVALID_REQUEST: exec approvals supports at most 512 rules");
+            var defaultAction = NormalizeAction(incoming.DefaultAction ?? currentDefault, "defaultAction");
+            if (defaultAction == Allow)
             {
-                return null;
+                throw new InvalidOperationException("INVALID_REQUEST: defaultAction=allow is not permitted on Windows");
             }
-            return new ExecApprovalsSocket
-            {
-                Path = string.IsNullOrWhiteSpace(path) ? null : path,
-                Token = string.IsNullOrWhiteSpace(token) ? null : token,
-            };
-        }
 
-        private static ExecApprovalsFile Normalize(ExecApprovalsFile file)
-        {
-            file.Version = 1;
-            file.Socket = NormalizeSocket(file.Socket);
-            file.Defaults = NormalizeDefaults(file.Defaults);
-            file.Agents = NormalizeAgents(file.Agents);
-            return file;
-        }
-
-        private static ExecApprovalsSocket? NormalizeSocket(ExecApprovalsSocket? socket)
-        {
-            if (socket == null) return null;
-            var path = socket.Path?.Trim();
-            var token = socket.Token?.Trim();
-            if (string.IsNullOrWhiteSpace(path) && string.IsNullOrWhiteSpace(token))
+            var rules = new List<NativeRule>(incoming.Rules.Count);
+            for (var index = 0; index < incoming.Rules.Count; index++)
             {
-                return null;
-            }
-            return new ExecApprovalsSocket
-            {
-                Path = string.IsNullOrWhiteSpace(path) ? null : path,
-                Token = string.IsNullOrWhiteSpace(token) ? null : token,
-            };
-        }
-
-        private static ExecApprovalsDefaults? NormalizeDefaults(ExecApprovalsDefaults? defaults)
-        {
-            if (defaults == null) return null;
-            defaults.Security = TrimOrNull(defaults.Security);
-            defaults.Ask = TrimOrNull(defaults.Ask);
-            defaults.AskFallback = TrimOrNull(defaults.AskFallback);
-            if (defaults.Security == null && defaults.Ask == null && defaults.AskFallback == null && defaults.AutoAllowSkills == null)
-            {
-                return null;
-            }
-            return defaults;
-        }
-
-        private static Dictionary<string, ExecApprovalsAgent>? NormalizeAgents(Dictionary<string, ExecApprovalsAgent>? agents)
-        {
-            if (agents == null || agents.Count == 0) return null;
-            var next = new Dictionary<string, ExecApprovalsAgent>(StringComparer.Ordinal);
-            foreach (var pair in agents)
-            {
-                var key = pair.Key?.Trim();
-                if (string.IsNullOrWhiteSpace(key)) continue;
-                var normalized = NormalizeAgent(pair.Value);
-                if (normalized != null)
+                var rule = incoming.Rules[index] ?? throw new InvalidOperationException($"INVALID_REQUEST: rule {index + 1} must be an object");
+                var pattern = rule.Pattern?.Trim() ?? string.Empty;
+                if (pattern.Length == 0 || pattern.Length > 1024)
+                    throw new InvalidOperationException($"INVALID_REQUEST: rule {index + 1} requires a pattern of at most 1024 characters");
+                var action = NormalizeAction(rule.Action, $"rule {index + 1} action");
+                var shells = rule.Shells?.Select(shell => shell?.Trim() ?? string.Empty).ToList();
+                if (shells is { Count: > 16 } || shells?.Any(shell => shell.Length == 0 || !SupportedShells.Contains(shell)) == true)
+                    throw new InvalidOperationException($"INVALID_REQUEST: rule {index + 1} contains an unsupported shell");
+                shells = shells?.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                var description = rule.Description?.Trim();
+                if (description?.Length > 1024) throw new InvalidOperationException($"INVALID_REQUEST: rule {index + 1} description is too long");
+                if (action == Allow) ValidateAllowRule(pattern, index + 1);
+                rules.Add(new NativeRule
                 {
-                    next[key] = normalized;
-                }
-            }
-            return next.Count > 0 ? next : null;
-        }
-
-        private static ExecApprovalsAgent? NormalizeAgent(ExecApprovalsAgent? agent)
-        {
-            if (agent == null) return null;
-            agent.Security = TrimOrNull(agent.Security);
-            agent.Ask = TrimOrNull(agent.Ask);
-            agent.AskFallback = TrimOrNull(agent.AskFallback);
-            agent.Allowlist = NormalizeAllowlist(agent.Allowlist);
-            if (agent.Security == null && agent.Ask == null && agent.AskFallback == null && agent.AutoAllowSkills == null && (agent.Allowlist == null || agent.Allowlist.Count == 0))
-            {
-                return null;
-            }
-            return agent;
-        }
-
-        private static List<ExecAllowlistEntry>? NormalizeAllowlist(List<ExecAllowlistEntry>? allowlist)
-        {
-            if (allowlist == null || allowlist.Count == 0) return null;
-            var next = new List<ExecAllowlistEntry>();
-            foreach (var entry in allowlist)
-            {
-                if (entry == null) continue;
-                var pattern = entry.Pattern?.Trim();
-                if (string.IsNullOrWhiteSpace(pattern)) continue;
-                next.Add(new ExecAllowlistEntry
-                {
-                    Id = string.IsNullOrWhiteSpace(entry.Id) ? Guid.NewGuid().ToString() : entry.Id,
                     Pattern = pattern,
-                    LastUsedAt = entry.LastUsedAt,
-                    LastUsedCommand = TrimOrNull(entry.LastUsedCommand),
-                    LastResolvedPath = TrimOrNull(entry.LastResolvedPath),
+                    Action = action,
+                    Shells = shells is { Count: > 0 } ? shells : null,
+                    Description = string.IsNullOrWhiteSpace(description) ? null : description,
+                    Enabled = rule.Enabled,
                 });
             }
-            return next.Count > 0 ? next : null;
+            return new StoredPolicy { DefaultAction = defaultAction, Rules = rules };
         }
 
-        private static ExecApprovalsFile Redact(ExecApprovalsFile file)
+        private static string NormalizeAction(string? value, string label)
         {
-            return new ExecApprovalsFile
+            var action = value?.Trim().ToLowerInvariant() ?? string.Empty;
+            return action is Allow or Deny or Prompt
+                ? action
+                : throw new InvalidOperationException($"INVALID_REQUEST: {label} must be allow, deny, or prompt");
+        }
+
+        private static void ValidateAllowRule(string pattern, int index)
+        {
+            var trimmed = pattern.Trim();
+            if (trimmed.All(character => character is '*' or '?' or ' ' or '\t'))
+                throw new InvalidOperationException($"INVALID_REQUEST: rule {index} is too broad to allow");
+            var executablePattern = FirstToken(trimmed);
+            if (executablePattern.IndexOfAny(new[] { '*', '?' }) >= 0)
+                throw new InvalidOperationException($"INVALID_REQUEST: rule {index} may not wildcard the executable");
+            var baseName = Path.GetFileName(executablePattern.Trim('"'));
+            if (DangerousAllowExecutables.Contains(baseName))
+                throw new InvalidOperationException($"INVALID_REQUEST: rule {index} may not allow a dangerous shell or loader");
+        }
+
+        private static bool RuleMatches(string pattern, string commandText, IReadOnlyList<string> argv)
+        {
+            if (argv.Count == 0) return false;
+            var hasCommandShape = pattern.Any(char.IsWhiteSpace) || pattern.IndexOfAny(new[] { '*', '?' }) >= 0;
+            if (hasCommandShape) return GlobMatch(pattern, commandText);
+            var executable = argv[0];
+            var baseName = Path.GetFileName(executable);
+            var stem = Path.GetFileNameWithoutExtension(executable);
+            return string.Equals(pattern, executable, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(pattern, baseName, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(pattern, stem, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool GlobMatch(string pattern, string value)
+        {
+            var regex = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+            return Regex.IsMatch(value, regex, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+        }
+
+        private static string ResolveShell(string executable)
+        {
+            var baseName = Path.GetFileNameWithoutExtension(executable).ToLowerInvariant();
+            return baseName switch
             {
-                Version = 1,
-                Socket = string.IsNullOrWhiteSpace(file.Socket?.Path)
-                    ? null
-                    : new ExecApprovalsSocket { Path = file.Socket!.Path!.Trim() },
-                Defaults = file.Defaults == null ? null : new ExecApprovalsDefaults
-                {
-                    Security = file.Defaults.Security,
-                    Ask = file.Defaults.Ask,
-                    AskFallback = file.Defaults.AskFallback,
-                    AutoAllowSkills = file.Defaults.AutoAllowSkills,
-                },
-                Agents = file.Agents?.ToDictionary(
-                    pair => pair.Key,
-                    pair => new ExecApprovalsAgent
-                    {
-                        Security = pair.Value.Security,
-                        Ask = pair.Value.Ask,
-                        AskFallback = pair.Value.AskFallback,
-                        AutoAllowSkills = pair.Value.AutoAllowSkills,
-                        Allowlist = pair.Value.Allowlist?.Select(entry => new ExecAllowlistEntry
-                        {
-                            Id = entry.Id,
-                            Pattern = entry.Pattern,
-                            LastUsedAt = entry.LastUsedAt,
-                            LastUsedCommand = entry.LastUsedCommand,
-                            LastResolvedPath = entry.LastResolvedPath,
-                        }).ToList(),
-                    },
-                    StringComparer.Ordinal),
+                "cmd" => "cmd",
+                "powershell" => "powershell",
+                "pwsh" => "pwsh",
+                _ => "direct",
             };
         }
 
-        private static string? TrimOrNull(string? value)
+        private static string FirstToken(string command)
         {
-            var trimmed = value?.Trim();
-            return string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+            if (command.StartsWith('"'))
+            {
+                var close = command.IndexOf('"', 1);
+                return close > 1 ? command[1..close] : command.Trim('"');
+            }
+            var whitespace = command.IndexOfAny(new[] { ' ', '\t' });
+            return whitespace < 0 ? command : command[..whitespace];
+        }
+
+        private static NativeSnapshot ToSnapshot(StoredPolicy policy)
+        {
+            var canonical = JsonSerializer.SerializeToUtf8Bytes(policy, new JsonSerializerOptions(JsonOptions) { WriteIndented = false });
+            var hash = "sha256:" + Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+            return new NativeSnapshot
+            {
+                Hash = hash,
+                BaseHash = hash,
+                DefaultAction = policy.DefaultAction,
+                Rules = policy.Rules,
+            };
+        }
+
+        private static object BuildConstraints() => new
+        {
+            baseHashRequired = true,
+            defaultAllowAllowed = false,
+            broadAllowRulesAllowed = false,
+            dangerousAllowRulesAllowed = false,
+        };
+
+        private static string ResolvePath()
+        {
+            var overrideDirectory = Environment.GetEnvironmentVariable("OPENCLAW_WINDOWS_HOME")?.Trim();
+            var directory = !string.IsNullOrWhiteSpace(overrideDirectory)
+                ? overrideDirectory!
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenClaw Companion");
+            return Path.Combine(directory, "exec-approvals-native.json");
         }
     }
 }

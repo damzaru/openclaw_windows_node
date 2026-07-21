@@ -25,6 +25,13 @@ namespace OpenClaw.Node.Tray
             return Task.CompletedTask;
         }
 
+        public Task ShowNotificationAsync(string title, string body, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _log?.Invoke($"[NOTIFY] {title}: {body}");
+            return Task.CompletedTask;
+        }
+
         public Task StopAsync()
         {
             _log?.Invoke("[TRAY] Stopped.");

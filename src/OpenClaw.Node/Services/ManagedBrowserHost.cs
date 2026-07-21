@@ -142,6 +142,7 @@ namespace OpenClaw.Node.Services
                     UseShellExecute = false,
                     CreateNoWindow = false,
                 };
+                ChildProcessSecurity.ScrubSensitiveEnvironment(startInfo);
 
                 startInfo.ArgumentList.Add($"--remote-debugging-port={new Uri(BundledBrowserRuntimeLocator.DefaultBrowserUrl).Port}");
                 startInfo.ArgumentList.Add("--remote-debugging-address=127.0.0.1");
