@@ -739,6 +739,7 @@ namespace OpenClaw.Node.Services
                 RedirectStandardOutput = true,
                 CreateNoWindow = true,
             };
+            ChildProcessSecurity.ScrubSensitiveEnvironment(psi);
             psi.ArgumentList.Add("-NoProfile");
             psi.ArgumentList.Add("-Command");
             psi.ArgumentList.Add(script);

@@ -28,9 +28,11 @@ namespace OpenClaw.Node.Tests
             using var doc = JsonDocument.Parse(res.PayloadJSON!);
             var root = doc.RootElement;
             Assert.True(root.TryGetProperty("bins", out var bins));
-            Assert.Equal(JsonValueKind.Array, bins.ValueKind);
-            Assert.True(root.TryGetProperty("paths", out var paths));
-            Assert.Equal(JsonValueKind.Object, paths.ValueKind);
+            Assert.Equal(JsonValueKind.Object, bins.ValueKind);
+            Assert.True(bins.TryGetProperty("dotnet", out var path));
+            Assert.Equal(JsonValueKind.String, path.ValueKind);
+            Assert.False(root.TryGetProperty("paths", out _));
+            Assert.False(root.TryGetProperty("missing", out _));
         }
 
         [Fact]
@@ -129,9 +131,12 @@ namespace OpenClaw.Node.Tests
                 Assert.NotNull(res.PayloadJSON);
                 using var doc = JsonDocument.Parse(res.PayloadJSON!);
                 var root = doc.RootElement;
-                Assert.False(root.GetProperty("exists").GetBoolean());
-                Assert.Equal(1, root.GetProperty("file").GetProperty("version").GetInt32());
+                Assert.True(root.GetProperty("enabled").GetBoolean());
+                Assert.Equal("deny", root.GetProperty("defaultAction").GetString());
+                Assert.Empty(root.GetProperty("rules").EnumerateArray());
                 Assert.False(string.IsNullOrWhiteSpace(root.GetProperty("hash").GetString()));
+                Assert.True(root.GetProperty("constraints").GetProperty("baseHashRequired").GetBoolean());
+                Assert.False(root.GetProperty("constraints").GetProperty("defaultAllowAllowed").GetBoolean());
             });
         }
 
@@ -159,18 +164,8 @@ namespace OpenClaw.Node.Tests
                     ParamsJSON = JsonSerializer.Serialize(new
                     {
                         baseHash,
-                        file = new
-                        {
-                            version = 1,
-                            defaults = new { security = "allowlist", ask = "on-miss" },
-                            agents = new
-                            {
-                                main = new
-                                {
-                                    allowlist = new[] { new { pattern = "python3" } }
-                                }
-                            }
-                        }
+                        defaultAction = "deny",
+                        rules = new[] { new { pattern = "dotnet", action = "allow", shells = new[] { "direct" } } }
                     })
                 };
 
@@ -180,14 +175,11 @@ namespace OpenClaw.Node.Tests
 
                 using var setDoc = JsonDocument.Parse(setRes.PayloadJSON!);
                 var root = setDoc.RootElement;
-                Assert.True(root.GetProperty("exists").GetBoolean());
-                Assert.Equal("allowlist", root.GetProperty("file").GetProperty("defaults").GetProperty("security").GetString());
-                var allowlist = root.GetProperty("file").GetProperty("agents").GetProperty("main").GetProperty("allowlist");
-                var allowlistItems = allowlist.EnumerateArray().ToArray();
-                Assert.Single(allowlistItems);
-                var entry = allowlistItems[0];
-                Assert.Equal("python3", entry.GetProperty("pattern").GetString());
-                Assert.False(string.IsNullOrWhiteSpace(entry.GetProperty("id").GetString()));
+                Assert.Equal("deny", root.GetProperty("defaultAction").GetString());
+                var rules = root.GetProperty("rules").EnumerateArray().ToArray();
+                Assert.Single(rules);
+                Assert.Equal("dotnet", rules[0].GetProperty("pattern").GetString());
+                Assert.Equal("allow", rules[0].GetProperty("action").GetString());
 
                 var staleSet = await executor.ExecuteAsync(new BridgeInvokeRequest
                 {
@@ -196,7 +188,7 @@ namespace OpenClaw.Node.Tests
                     ParamsJSON = JsonSerializer.Serialize(new
                     {
                         baseHash = "deadbeef",
-                        file = new { version = 1 }
+                        rules = Array.Empty<object>()
                     })
                 });
 
@@ -208,7 +200,7 @@ namespace OpenClaw.Node.Tests
         }
 
         [Fact]
-        public async Task ScreenList_ShouldReturnDisplaysArray()
+        public async Task ScreenList_ShouldNotBeGatewayInvokable()
         {
             var executor = new NodeCommandExecutor();
             var req = new BridgeInvokeRequest
@@ -219,32 +211,14 @@ namespace OpenClaw.Node.Tests
 
             var res = await executor.ExecuteAsync(req);
 
-            if (!res.Ok) throw new Exception(res.Error?.Message ?? "(no error)");
-            Assert.NotNull(res.PayloadJSON);
-
-            using var doc = JsonDocument.Parse(res.PayloadJSON!);
-            var root = doc.RootElement;
-            Assert.True(root.TryGetProperty("displays", out var displays));
-            Assert.Equal(JsonValueKind.Array, displays.ValueKind);
-
-            foreach (var d in displays.EnumerateArray())
-            {
-                Assert.True(d.TryGetProperty("index", out var index));
-                Assert.Equal(JsonValueKind.Number, index.ValueKind);
-                Assert.True(index.GetInt32() >= 0);
-
-                Assert.True(d.TryGetProperty("id", out var id));
-                Assert.Equal(JsonValueKind.String, id.ValueKind);
-
-                Assert.True(d.TryGetProperty("name", out var name));
-                Assert.Equal(JsonValueKind.String, name.ValueKind);
-            }
+            Assert.False(res.Ok);
+            Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error?.Code);
         }
 
         [Fact]
         public async Task ScreenRecord_ShouldReturnExpectedResult_ForCurrentPlatform()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableScreenRecording = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "screen-1",
@@ -290,7 +264,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task CameraList_ShouldReturnDevicesArray()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableCameraSnapshots = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "camera-list-1",
@@ -326,7 +300,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task CameraSnap_ShouldReturnExpectedPayloadShape()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableCameraSnapshots = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "camera-1",
@@ -355,14 +329,13 @@ namespace OpenClaw.Node.Tests
         }
 
         [Fact]
-        public async Task SystemRun_LegacyCommandAndArgs_ShouldStillWork()
+        public async Task SystemRun_LegacyCommandAndArgs_ShouldBeRejected()
         {
             var executor = new NodeCommandExecutor();
             object command = OperatingSystem.IsWindows() ? "cmd.exe" : "bash";
             object args = OperatingSystem.IsWindows()
                 ? new[] { "/c", "echo WINDOWS_OK" }
                 : new[] { "-lc", "echo UNIX_OK" };
-            var expected = OperatingSystem.IsWindows() ? "WINDOWS_OK" : "UNIX_OK";
             var req = new BridgeInvokeRequest
             {
                 Id = "run-legacy-args",
@@ -372,12 +345,9 @@ namespace OpenClaw.Node.Tests
 
             var res = await executor.ExecuteAsync(req);
 
-            Assert.True(res.Ok);
-            Assert.NotNull(res.PayloadJSON);
-            using var doc = JsonDocument.Parse(res.PayloadJSON!);
-            var root = doc.RootElement;
-            Assert.True(root.GetProperty("success").GetBoolean());
-            Assert.Contains(expected, root.GetProperty("stdout").GetString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+            Assert.False(res.Ok);
+            Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error?.Code);
+            Assert.Contains("string array", res.Error?.Message);
         }
 
         [Fact]
@@ -388,7 +358,7 @@ namespace OpenClaw.Node.Tests
             {
                 Id = "run-invalid-timeout",
                 Command = "system.run",
-                ParamsJSON = "{\"command\":\"echo hi\",\"timeoutMs\":\"1000\"}"
+                ParamsJSON = "{\"command\":[\"dotnet\",\"--info\"],\"timeoutMs\":\"1000\"}"
             };
 
             var res = await executor.ExecuteAsync(req);
@@ -445,35 +415,59 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task SystemRun_Timeout_ShouldKillProcessTree_AndReturnTimedOut()
         {
-            var executor = new NodeCommandExecutor();
-
-            object command = OperatingSystem.IsWindows()
-                ? new[] { "powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 2" }
-                : new[] { "bash", "-lc", "sleep 2" };
-
-            var req = new BridgeInvokeRequest
+            await WithTempOpenClawHome(async () =>
             {
-                Id = "run-timeout",
-                Command = "system.run",
-                ParamsJSON = JsonSerializer.Serialize(new { command, timeoutMs = 100 })
-            };
+                var executor = new NodeCommandExecutor();
+                var executable = OperatingSystem.IsWindows() ? "ping.exe" : "sleep";
+                var firstGet = await executor.ExecuteAsync(new BridgeInvokeRequest
+                {
+                    Id = "timeout-policy-get",
+                    Command = "system.execApprovals.get",
+                    ParamsJSON = "{}"
+                });
+                using var getDocument = JsonDocument.Parse(firstGet.PayloadJSON!);
+                var baseHash = getDocument.RootElement.GetProperty("hash").GetString();
+                var setPolicy = await executor.ExecuteAsync(new BridgeInvokeRequest
+                {
+                    Id = "timeout-policy-set",
+                    Command = "system.execApprovals.set",
+                    ParamsJSON = JsonSerializer.Serialize(new
+                    {
+                        baseHash,
+                        defaultAction = "deny",
+                        rules = new[] { new { pattern = executable, action = "allow", shells = new[] { "direct" } } }
+                    })
+                });
+                Assert.True(setPolicy.Ok, setPolicy.Error?.Message);
 
-            var res = await executor.ExecuteAsync(req);
+                object command = OperatingSystem.IsWindows()
+                    ? new[] { executable, "127.0.0.1", "-n", "5" }
+                    : new[] { executable, "2" };
 
-            Assert.True(res.Ok);
-            Assert.Null(res.Error);
-            Assert.NotNull(res.PayloadJSON);
-            using var doc = JsonDocument.Parse(res.PayloadJSON!);
-            var root = doc.RootElement;
-            Assert.True(root.GetProperty("timedOut").GetBoolean());
-            Assert.Equal(-1, root.GetProperty("exitCode").GetInt32());
-            Assert.False(root.GetProperty("success").GetBoolean());
+                var req = new BridgeInvokeRequest
+                {
+                    Id = "run-timeout",
+                    Command = "system.run",
+                    ParamsJSON = JsonSerializer.Serialize(new { command, timeoutMs = 100 })
+                };
+
+                var res = await executor.ExecuteAsync(req);
+
+                Assert.True(res.Ok, res.Error?.Message);
+                Assert.Null(res.Error);
+                Assert.NotNull(res.PayloadJSON);
+                using var doc = JsonDocument.Parse(res.PayloadJSON!);
+                var root = doc.RootElement;
+                Assert.True(root.GetProperty("timedOut").GetBoolean());
+                Assert.Equal(-1, root.GetProperty("exitCode").GetInt32());
+                Assert.False(root.GetProperty("success").GetBoolean());
+            });
         }
 
         [Fact]
         public async Task ScreenRecord_InvalidDuration_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableScreenRecording = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "screen-invalid-duration",
@@ -489,9 +483,29 @@ namespace OpenClaw.Node.Tests
         }
 
         [Fact]
+        public async Task SystemNotify_UsesNativeNotificationSink()
+        {
+            string? observed = null;
+            using var executor = new NodeCommandExecutor(notificationSink: (title, body, _) =>
+            {
+                observed = title + "|" + body;
+                return Task.CompletedTask;
+            });
+            var res = await executor.ExecuteAsync(new BridgeInvokeRequest
+            {
+                Id = "notify-1",
+                Command = "system.notify",
+                ParamsJSON = JsonSerializer.Serialize(new { title = "OpenClaw", body = "Ready" })
+            });
+
+            Assert.True(res.Ok);
+            Assert.Equal("OpenClaw|Ready", observed);
+        }
+
+        [Fact]
         public async Task ScreenRecord_InvalidFps_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableScreenRecording = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "screen-invalid-fps",
@@ -509,7 +523,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task ScreenRecord_InvalidIncludeAudioType_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableScreenRecording = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "screen-invalid-audio",
@@ -527,7 +541,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task ScreenRecord_InvalidScreenIndex_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableScreenRecording = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "screen-invalid-index",
@@ -545,7 +559,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task ScreenRecord_InvalidCaptureApiType_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableScreenRecording = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "screen-invalid-capture-api",
@@ -563,7 +577,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task ScreenRecord_InvalidLowLatencyType_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableScreenRecording = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "screen-invalid-low-latency",
@@ -581,7 +595,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task ScreenRecord_InvalidDurationType_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableScreenRecording = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "screen-invalid-duration-type",
@@ -599,7 +613,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task CameraSnap_InvalidFacing_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableCameraSnapshots = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "camera-invalid-facing",
@@ -617,7 +631,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task CameraSnap_InvalidFormat_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableCameraSnapshots = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "camera-invalid-format",
@@ -635,7 +649,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public async Task CameraSnap_InvalidQuality_ShouldReturnInvalidRequest()
         {
-            var executor = new NodeCommandExecutor();
+            var executor = new NodeCommandExecutor(settings: new CompanionSettings { EnableCameraSnapshots = true });
             var req = new BridgeInvokeRequest
             {
                 Id = "camera-invalid-quality",
@@ -651,20 +665,15 @@ namespace OpenClaw.Node.Tests
         }
 
         [Fact]
-        public async Task WindowList_ShouldReturnWindowsArray()
+        public async Task WindowList_ShouldNotBeGatewayInvokable()
         {
             var executor = new NodeCommandExecutor();
             var req = new BridgeInvokeRequest { Id = "window-list-1", Command = "window.list" };
 
             var res = await executor.ExecuteAsync(req);
 
-            Assert.True(res.Ok);
-            Assert.NotNull(res.PayloadJSON);
-
-            using var doc = JsonDocument.Parse(res.PayloadJSON!);
-            var root = doc.RootElement;
-            Assert.True(root.TryGetProperty("windows", out var windows));
-            Assert.Equal(JsonValueKind.Array, windows.ValueKind);
+            Assert.False(res.Ok);
+            Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error?.Code);
         }
 
         [Fact]
@@ -766,7 +775,7 @@ namespace OpenClaw.Node.Tests
             Assert.False(res.Ok);
             Assert.NotNull(res.Error);
             Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error!.Code);
-            Assert.Contains("must be integers", res.Error.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Unsupported or disabled gateway command", res.Error.Message, StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]
@@ -956,7 +965,7 @@ namespace OpenClaw.Node.Tests
         }
 
         [Fact]
-        public async Task SystemDescribe_ShouldReportBundledBrowserRuntimeShape()
+        public async Task SystemDescribe_ShouldNotBeGatewayInvokable()
         {
             var executor = new NodeCommandExecutor();
             var req = new BridgeInvokeRequest
@@ -967,15 +976,8 @@ namespace OpenClaw.Node.Tests
 
             var res = await executor.ExecuteAsync(req);
 
-            Assert.True(res.Ok);
-            Assert.NotNull(res.PayloadJSON);
-
-            using var doc = JsonDocument.Parse(res.PayloadJSON!);
-            var root = doc.RootElement;
-            var runtimeBrowser = root.GetProperty("runtime").GetProperty("browser");
-            Assert.Equal("managed-or-existing-bundled", runtimeBrowser.GetProperty("backendMode").GetString());
-            Assert.True(runtimeBrowser.TryGetProperty("bundledRuntime", out var bundledRuntime));
-            Assert.True(bundledRuntime.TryGetProperty("available", out _));
+            Assert.False(res.Ok);
+            Assert.Equal(OpenClawNodeErrorCode.InvalidRequest, res.Error?.Code);
         }
 
         [Fact]
@@ -1035,9 +1037,11 @@ namespace OpenClaw.Node.Tests
         private static async Task WithTempOpenClawHome(Func<Task> action)
         {
             var original = Environment.GetEnvironmentVariable("USERPROFILE");
+            var originalWindowsHome = Environment.GetEnvironmentVariable("OPENCLAW_WINDOWS_HOME");
             var tempRoot = Path.Combine(Path.GetTempPath(), "oc-node-tests-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempRoot);
             Environment.SetEnvironmentVariable("USERPROFILE", tempRoot);
+            Environment.SetEnvironmentVariable("OPENCLAW_WINDOWS_HOME", tempRoot);
             try
             {
                 await action();
@@ -1045,6 +1049,7 @@ namespace OpenClaw.Node.Tests
             finally
             {
                 Environment.SetEnvironmentVariable("USERPROFILE", original);
+                Environment.SetEnvironmentVariable("OPENCLAW_WINDOWS_HOME", originalWindowsHome);
                 try
                 {
                     Directory.Delete(tempRoot, recursive: true);

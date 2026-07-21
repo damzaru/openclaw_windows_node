@@ -12,6 +12,7 @@ namespace OpenClaw.Node.Tray
         private readonly Action<string>? _log;
         private readonly Action? _onOpenLogs;
         private readonly Action? _onOpenConfig;
+        private readonly Action? _onOpenSettings;
         private readonly Action? _onRestart;
         private readonly Action? _onExit;
         private readonly Action? _onCopyDiagnostics;
@@ -30,11 +31,12 @@ namespace OpenClaw.Node.Tray
         private object? _onboardingItem;
         private object? _buildItem;
 
-        public WindowsNotifyIconTrayHost(Action<string>? log = null, Action? onOpenLogs = null, Action? onOpenConfig = null, Action? onRestart = null, Action? onExit = null, Action? onCopyDiagnostics = null)
+        public WindowsNotifyIconTrayHost(Action<string>? log = null, Action? onOpenLogs = null, Action? onOpenConfig = null, Action? onOpenSettings = null, Action? onRestart = null, Action? onExit = null, Action? onCopyDiagnostics = null)
         {
             _log = log;
             _onOpenLogs = onOpenLogs;
             _onOpenConfig = onOpenConfig;
+            _onOpenSettings = onOpenSettings;
             _onRestart = onRestart;
             _onExit = onExit;
             _onCopyDiagnostics = onCopyDiagnostics;
@@ -96,6 +98,32 @@ namespace OpenClaw.Node.Tray
             }, null);
 
             return Task.CompletedTask;
+        }
+
+        public Task ShowNotificationAsync(string title, string body, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_notifyIcon == null || _uiContext == null)
+                throw new InvalidOperationException("Windows notification tray is not active");
+
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _uiContext.Post(_ =>
+            {
+                try
+                {
+                    SetProperty(_notifyIcon, "BalloonTipTitle", string.IsNullOrWhiteSpace(title) ? "OpenClaw" : title.Trim());
+                    SetProperty(_notifyIcon, "BalloonTipText", string.IsNullOrWhiteSpace(body) ? "OpenClaw notification" : body.Trim());
+                    var show = _notifyIcon.GetType().GetMethod("ShowBalloonTip", new[] { typeof(int) })
+                        ?? throw new InvalidOperationException("NotifyIcon.ShowBalloonTip is unavailable");
+                    show.Invoke(_notifyIcon, new object[] { 5000 });
+                    completion.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex.InnerException ?? ex);
+                }
+            }, null);
+            return completion.Task.WaitAsync(cancellationToken);
         }
 
         public async Task StopAsync()
@@ -183,6 +211,8 @@ namespace OpenClaw.Node.Tray
                     ?? throw new InvalidOperationException("Unable to create Open Logs item");
                 var openConfigItem = Activator.CreateInstance(menuItemType, "Open Config File")
                     ?? throw new InvalidOperationException("Unable to create Open Config item");
+                var settingsItem = Activator.CreateInstance(menuItemType, "Settings...")
+                    ?? throw new InvalidOperationException("Unable to create Settings item");
                 var copyDiagItem = Activator.CreateInstance(menuItemType, "Copy Diagnostics")
                     ?? throw new InvalidOperationException("Unable to create Copy Diagnostics item");
                 var restartItem = Activator.CreateInstance(menuItemType, "Restart Node")
@@ -199,6 +229,11 @@ namespace OpenClaw.Node.Tray
                 {
                     try { _onOpenConfig?.Invoke(); }
                     catch (Exception ex) { _log?.Invoke($"[TRAY] Open Config action failed: {ex.Message}"); }
+                });
+                AddClickHandler(settingsItem, () =>
+                {
+                    try { _onOpenSettings?.Invoke(); }
+                    catch (Exception ex) { _log?.Invoke($"[TRAY] Settings action failed: {ex.Message}"); }
                 });
                 AddClickHandler(copyDiagItem, () =>
                 {
@@ -223,6 +258,7 @@ namespace OpenClaw.Node.Tray
                 AddMenuItem(menu, _buildItem);
                 if (separatorType != null && Activator.CreateInstance(separatorType) is object separator1) AddMenuItem(menu, separator1);
                 AddMenuItem(menu, openLogsItem);
+                AddMenuItem(menu, settingsItem);
                 AddMenuItem(menu, openConfigItem);
                 AddMenuItem(menu, copyDiagItem);
                 AddMenuItem(menu, restartItem);

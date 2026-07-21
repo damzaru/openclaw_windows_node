@@ -9,20 +9,20 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenClaw.Node.Tests", "Open
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
-		Debug|Any CPU = Debug|Any CPU
-		Release|Any CPU = Release|Any CPU
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{7C5EBF0F-FE6F-48F9-94DF-C61F1CC339BD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{7C5EBF0F-FE6F-48F9-94DF-C61F1CC339BD}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{7C5EBF0F-FE6F-48F9-94DF-C61F1CC339BD}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{7C5EBF0F-FE6F-48F9-94DF-C61F1CC339BD}.Release|Any CPU.Build.0 = Release|Any CPU
-		{0D215F44-DDB9-48B4-80F8-4AC90291E161}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{0D215F44-DDB9-48B4-80F8-4AC90291E161}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{0D215F44-DDB9-48B4-80F8-4AC90291E161}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{0D215F44-DDB9-48B4-80F8-4AC90291E161}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7C5EBF0F-FE6F-48F9-94DF-C61F1CC339BD}.Debug|x64.ActiveCfg = Debug|x64
+		{7C5EBF0F-FE6F-48F9-94DF-C61F1CC339BD}.Debug|x64.Build.0 = Debug|x64
+		{7C5EBF0F-FE6F-48F9-94DF-C61F1CC339BD}.Release|x64.ActiveCfg = Release|x64
+		{7C5EBF0F-FE6F-48F9-94DF-C61F1CC339BD}.Release|x64.Build.0 = Release|x64
+		{0D215F44-DDB9-48B4-80F8-4AC90291E161}.Debug|x64.ActiveCfg = Debug|x64
+		{0D215F44-DDB9-48B4-80F8-4AC90291E161}.Debug|x64.Build.0 = Debug|x64
+		{0D215F44-DDB9-48B4-80F8-4AC90291E161}.Release|x64.ActiveCfg = Release|x64
+		{0D215F44-DDB9-48B4-80F8-4AC90291E161}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 EndGlobal

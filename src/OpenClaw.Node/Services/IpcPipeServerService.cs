@@ -6,6 +6,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -88,7 +89,7 @@ namespace OpenClaw.Node.Services
                         PipeDirection.InOut,
                         NamedPipeServerStream.MaxAllowedServerInstances,
                         PipeTransmissionMode.Byte,
-                        PipeOptions.Asynchronous);
+                        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
 
                     await server.WaitForConnectionAsync(ct);
 
@@ -120,7 +121,7 @@ namespace OpenClaw.Node.Services
         {
             await using var _ = stream;
             using var reader = new StreamReader(stream, Encoding.UTF8, false, 4096, leaveOpen: true);
-            await using var writer = new StreamWriter(stream, new UTF8Encoding(false), 4096, leaveOpen: true)
+            var writer = new StreamWriter(stream, new UTF8Encoding(false), 4096, leaveOpen: true)
             {
                 AutoFlush = true
             };
@@ -198,6 +199,7 @@ namespace OpenClaw.Node.Services
             }
             finally
             {
+                try { writer.Dispose(); } catch { }
                 OnLog?.Invoke($"[IPC] Client {clientId} disconnected.");
             }
         }
@@ -205,7 +207,9 @@ namespace OpenClaw.Node.Services
         private bool IsAuthorized(IpcRequest req)
         {
             if (string.IsNullOrWhiteSpace(_authToken)) return true;
-            return string.Equals(req.AuthToken, _authToken, StringComparison.Ordinal);
+            var expected = SHA256.HashData(Encoding.UTF8.GetBytes(_authToken));
+            var actual = SHA256.HashData(Encoding.UTF8.GetBytes(req.AuthToken ?? string.Empty));
+            return CryptographicOperations.FixedTimeEquals(expected, actual);
         }
 
         private static bool TryResolveRequestTimeoutMs(IpcRequest req, out int timeoutMs, out string? error)
@@ -787,6 +791,7 @@ namespace OpenClaw.Node.Services
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
+            ChildProcessSecurity.ScrubSensitiveEnvironment(psi);
 
             if (!string.IsNullOrWhiteSpace(workingDirectory))
             {

@@ -23,6 +23,8 @@
     <PackageReference Include="ModelContextProtocol" Version="1.1.0" />
     <PackageReference Include="ScreenRecorderLib" Version="6.6.0" />
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" Condition="'$(TargetFramework)' == 'net8.0-windows'" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

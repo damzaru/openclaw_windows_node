@@ -11,12 +11,12 @@ using OpenClaw.Node.Protocol;
 
 namespace OpenClaw.Node.Services
 {
-    public class NodeCommandExecutor
+    public class NodeCommandExecutor : IDisposable
     {
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+            DefaultIgnoreCondition = JsonIgnoreCondition.Never
         };
 
         private static string ToJson(object? value) => JsonSerializer.Serialize(value, JsonOptions);
@@ -24,47 +24,75 @@ namespace OpenClaw.Node.Services
         private readonly IGatewayRpcClient? _rpc;
         private readonly IScreenImageProvider _screen;
         private readonly IBrowserProxyService? _browserProxy;
+        private readonly CompanionSettings _settings;
+        private readonly Func<string, string, CancellationToken, Task>? _notificationSink;
+        private readonly WindowsDeviceService _device = new();
+        private readonly CameraCaptureService _camera = new();
+        private readonly CanvasService _canvas;
+        private readonly TalkPushToTalkService _talk;
 
         public NodeCommandExecutor(
             IGatewayRpcClient? rpc = null,
             IScreenImageProvider? screen = null,
-            IBrowserProxyService? browserProxyService = null)
+            IBrowserProxyService? browserProxyService = null,
+            CompanionSettings? settings = null,
+            IGatewayRequestClient? operatorClient = null,
+            string? instanceId = null,
+            Func<string, string, CancellationToken, Task>? notificationSink = null)
         {
             _rpc = rpc;
             _screen = screen ?? new ScreenCaptureService();
             _browserProxy = browserProxyService;
+            _settings = settings ?? new CompanionSettings();
+            _notificationSink = notificationSink;
+            _settings.Normalize();
+            _canvas = new CanvasService(
+                _screen,
+                rpc as IPluginSurfaceClient,
+                operatorClient,
+                _settings.TalkSessionKey,
+                instanceId);
+            _talk = new TalkPushToTalkService(operatorClient, _settings.TalkSessionKey);
         }
 
-        public async Task<BridgeInvokeResponse> ExecuteAsync(BridgeInvokeRequest request)
+        public async Task<BridgeInvokeResponse> ExecuteAsync(BridgeInvokeRequest request, CancellationToken cancellationToken = default)
         {
             try
             {
+                if (!NodeCapabilityRegistry.IsGatewayCommandEnabled(request.Command, _settings))
+                {
+                    return Invalid(request.Id, $"Unsupported or disabled gateway command: {request.Command}");
+                }
                 return request.Command switch
                 {
-                    "system.notify" => HandleSystemNotify(request),
-                    "system.which" => await HandleSystemWhichAsync(request),
+                    "system.notify" => await HandleSystemNotifyAsync(request, cancellationToken),
+                    "system.which" => await HandleSystemWhichAsync(request, cancellationToken),
                     "system.execApprovals.get" => HandleSystemExecApprovalsGet(request),
                     "system.execApprovals.set" => HandleSystemExecApprovalsSet(request),
                     "system.run.prepare" => HandleSystemRunPrepare(request),
-                    "system.run" => await HandleSystemRunAsync(request),
-                    "system.describe" => HandleSystemDescribe(request),
-                    "browser.proxy" => await HandleBrowserProxyAsync(request),
-                    "screen.capture" => await HandleScreenCaptureAsync(request),
-                    "screen.list" => await HandleScreenListAsync(request),
-                    "screen.record" => await HandleScreenRecordAsync(request),
-                    "camera.list" => await HandleCameraListAsync(request),
-                    "camera.snap" => await HandleCameraSnapAsync(request),
-                    "window.list" => await HandleWindowListAsync(request),
-                    "window.focus" => await HandleWindowFocusAsync(request),
-                    "window.rect" => await HandleWindowRectAsync(request),
-                    "input.type" => await HandleInputTypeAsync(request),
-                    "input.key" => await HandleInputKeyAsync(request),
-                    "input.click" => await HandleInputClickAsync(request),
-                    "input.scroll" => await HandleInputScrollAsync(request),
-                    "input.click.relative" => await HandleInputClickRelativeAsync(request),
-                    "ui.find" => await HandleUiFindAsync(request),
-                    "ui.click" => await HandleUiClickAsync(request),
-                    "ui.type" => await HandleUiTypeAsync(request),
+                    "system.run" => await HandleSystemRunAsync(request, cancellationToken),
+                    "fs.listDir" => HandleFsListDir(request),
+                    "browser.proxy" => await HandleBrowserProxyAsync(request, cancellationToken),
+                    "screen.snapshot" => await HandleScreenSnapshotAsync(request, cancellationToken),
+                    "screen.record" => await HandleScreenRecordAsync(request, cancellationToken),
+                    "camera.list" => await HandleCameraListAsync(request, cancellationToken),
+                    "camera.snap" => await HandleCameraSnapAsync(request, cancellationToken),
+                    "camera.clip" => await HandleCameraClipAsync(request, cancellationToken),
+                    "location.get" => await HandleLocationGetAsync(request, cancellationToken),
+                    "device.info" => Success(request.Id, _device.GetInfo()),
+                    "device.status" => Success(request.Id, _device.GetStatus()),
+                    "canvas.present" => await HandleCanvasPresentAsync(request, cancellationToken),
+                    "canvas.hide" => await HandleCanvasHideAsync(request, cancellationToken),
+                    "canvas.navigate" => await HandleCanvasNavigateAsync(request, cancellationToken),
+                    "canvas.eval" => await HandleCanvasEvalAsync(request, cancellationToken),
+                    "canvas.snapshot" => await HandleCanvasSnapshotAsync(request, cancellationToken),
+                    "canvas.a2ui.push" => await HandleCanvasA2UiPushAsync(request, false, cancellationToken),
+                    "canvas.a2ui.pushJSONL" => await HandleCanvasA2UiPushAsync(request, true, cancellationToken),
+                    "canvas.a2ui.reset" => await HandleCanvasA2UiResetAsync(request, cancellationToken),
+                    "talk.ptt.start" => Success(request.Id, await _talk.StartAsync(cancellationToken)),
+                    "talk.ptt.stop" => Success(request.Id, await _talk.StopAsync(cancellationToken)),
+                    "talk.ptt.cancel" => Success(request.Id, await _talk.CancelAsync()),
+                    "talk.ptt.once" => Success(request.Id, await _talk.OnceAsync(cancellationToken)),
                     _ => new BridgeInvokeResponse
                     {
                         Id = request.Id,
@@ -77,6 +105,10 @@ namespace OpenClaw.Node.Services
                     }
                 };
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 return new BridgeInvokeResponse
@@ -85,14 +117,14 @@ namespace OpenClaw.Node.Services
                     Ok = false,
                     Error = new OpenClawNodeError
                     {
-                        Code = OpenClawNodeErrorCode.Unavailable,
+                        Code = MapExceptionCode(ex),
                         Message = ex.Message
                     }
                 };
             }
         }
 
-        private BridgeInvokeResponse HandleSystemNotify(BridgeInvokeRequest request)
+        private async Task<BridgeInvokeResponse> HandleSystemNotifyAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
         {
             var root = ParseParams(request.ParamsJSON);
             if (root == null)
@@ -113,7 +145,20 @@ namespace OpenClaw.Node.Services
                 return Invalid(request.Id, "INVALID_REQUEST: empty notification");
             }
 
-            Console.WriteLine($"[NOTIFY] {title ?? "(no title)"}: {body ?? ""}");
+            if (root.Value.TryGetProperty("sound", out var sound) && sound.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                return Invalid(request.Id, "INVALID_REQUEST: system.notify sound must be a string");
+            if (root.Value.TryGetProperty("priority", out var priority) &&
+                (priority.ValueKind != JsonValueKind.String || priority.GetString() is not ("passive" or "active" or "timeSensitive")))
+                return Invalid(request.Id, "INVALID_REQUEST: system.notify priority must be passive, active, or timeSensitive");
+            if (root.Value.TryGetProperty("delivery", out var delivery) &&
+                (delivery.ValueKind != JsonValueKind.String || delivery.GetString() is not ("system" or "overlay" or "auto")))
+                return Invalid(request.Id, "INVALID_REQUEST: system.notify delivery must be system, overlay, or auto");
+            if (root.Value.TryGetProperty("delivery", out delivery) && delivery.GetString() == "overlay")
+                return Unavailable(request.Id, "NOTIFICATION_UNAVAILABLE: overlay delivery is not supported on Windows");
+
+            if (_notificationSink == null)
+                return Unavailable(request.Id, "NOTIFICATION_UNAVAILABLE: the Windows notification host is not active");
+            await _notificationSink(title, body, cancellationToken).ConfigureAwait(false);
             return new BridgeInvokeResponse
             {
                 Id = request.Id,
@@ -122,7 +167,7 @@ namespace OpenClaw.Node.Services
             };
         }
 
-        private async Task<BridgeInvokeResponse> HandleSystemWhichAsync(BridgeInvokeRequest request)
+        private async Task<BridgeInvokeResponse> HandleSystemWhichAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
         {
             var root = ParseParams(request.ParamsJSON);
             var bins = ResolveSystemWhichBins(root);
@@ -135,38 +180,27 @@ namespace OpenClaw.Node.Services
                     Error = new OpenClawNodeError
                     {
                         Code = OpenClawNodeErrorCode.InvalidRequest,
-                        Message = "system.which requires params.bins (or legacy params.command)"
+                        Message = "INVALID_REQUEST: system.which requires a non-empty string array in params.bins"
                     }
                 };
             }
 
             var whichProgram = OperatingSystem.IsWindows() ? "where" : "which";
-            var matches = new System.Collections.Generic.List<string>();
-            var paths = new Dictionary<string, string>(StringComparer.Ordinal);
-            var missing = new System.Collections.Generic.List<string>();
+            var pathsByBin = new Dictionary<string, string>(StringComparer.Ordinal);
 
             foreach (var bin in bins)
             {
-                var result = await RunProcessAsync(whichProgram, new[] { bin });
+                var result = await RunProcessAsync(whichProgram, new[] { bin }, timeoutMs: 10_000, cancellationToken: cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
                 var path = FirstNonEmptyLine(result.StdOut);
                 var found = result.ExitCode == 0 && !string.IsNullOrWhiteSpace(path);
                 if (found)
                 {
-                    matches.Add(bin);
-                    paths[bin] = path!;
-                }
-                else
-                {
-                    missing.Add(bin);
+                    pathsByBin[bin] = path!;
                 }
             }
 
-            var payload = new
-            {
-                bins = matches,
-                paths,
-                missing,
-            };
+            var payload = new { bins = pathsByBin };
 
             return new BridgeInvokeResponse
             {
@@ -210,12 +244,16 @@ namespace OpenClaw.Node.Services
             try
             {
                 var parsed = ExecApprovalsStore.DecodeSetParams(request.ParamsJSON);
-                if (parsed.File == null)
+                if (parsed.Rules == null)
                 {
-                    return Invalid(request.Id, "INVALID_REQUEST: exec approvals file required");
+                    return Invalid(request.Id, "INVALID_REQUEST: exec approvals rules are required");
                 }
 
-                var snapshot = ExecApprovalsStore.Save(parsed.File, parsed.BaseHash);
+                var snapshot = ExecApprovalsStore.Save(new ExecApprovalsStore.NativePolicy
+                {
+                    DefaultAction = parsed.DefaultAction,
+                    Rules = parsed.Rules,
+                }, parsed.BaseHash);
                 return new BridgeInvokeResponse
                 {
                     Id = request.Id,
@@ -262,6 +300,7 @@ namespace OpenClaw.Node.Services
                 : null;
 
             var argv = new[] { fileName! }.Concat(args!).ToArray();
+            var approval = ExecApprovalsStore.Evaluate(commandText!, argv);
             return new BridgeInvokeResponse
             {
                 Id = request.Id,
@@ -277,12 +316,18 @@ namespace OpenClaw.Node.Services
                         agentId,
                         sessionKey,
                         mutableFileOperand = (object?)null,
+                        nativeApproval = new
+                        {
+                            action = approval.Action,
+                            shell = approval.Shell,
+                            matchedRule = approval.Rule?.Pattern,
+                        },
                     }
                 })
             };
         }
 
-        private async Task<BridgeInvokeResponse> HandleSystemRunAsync(BridgeInvokeRequest request)
+        private async Task<BridgeInvokeResponse> HandleSystemRunAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
         {
             var root = ParseParams(request.ParamsJSON);
             if (root == null)
@@ -290,7 +335,7 @@ namespace OpenClaw.Node.Services
                 return Invalid(request.Id, "system.run requires params");
             }
 
-            if (!TryResolveSystemRunCommand(root.Value, request.Id, out var fileName, out var args, out _, out _, out var cwd, out var invalid))
+            if (!TryResolveSystemRunCommand(root.Value, request.Id, out var fileName, out var args, out var commandText, out _, out var cwd, out var invalid))
             {
                 return invalid!;
             }
@@ -311,7 +356,39 @@ namespace OpenClaw.Node.Services
                 timeoutMs = parsedTimeout;
             }
 
-            var result = await RunProcessAsync(fileName!, args!, cwd, timeoutMs);
+            var argv = new[] { fileName! }.Concat(args!).ToArray();
+            if (!ValidateSystemRunPlan(root.Value, argv, commandText!, cwd, request.Id, out invalid))
+            {
+                return invalid!;
+            }
+
+            if (!TryReadSystemRunEnvironment(root.Value, request.Id, argv, out var environment, out invalid))
+            {
+                return invalid!;
+            }
+
+            var approval = ExecApprovalsStore.Evaluate(commandText!, argv);
+            if (!string.Equals(approval.Action, ExecApprovalsStore.Allow, StringComparison.Ordinal))
+            {
+                var reason = approval.Action == ExecApprovalsStore.Prompt
+                    ? "local approval is required but no interactive approval is active"
+                    : "Windows execution policy denied the command";
+                await SendExecEventBestEffortAsync("exec.denied", root.Value, commandText!, new { reason = "approval-required" }, cancellationToken);
+                return new BridgeInvokeResponse
+                {
+                    Id = request.Id,
+                    Ok = false,
+                    Error = new OpenClawNodeError
+                    {
+                        Code = OpenClawNodeErrorCode.SystemRunDenied,
+                        Message = $"SYSTEM_RUN_DENIED: {reason}",
+                        Retryable = approval.Action == ExecApprovalsStore.Prompt,
+                    }
+                };
+            }
+
+            var result = await RunProcessAsync(fileName!, args!, cwd, timeoutMs, cancellationToken, environment);
+            cancellationToken.ThrowIfCancellationRequested();
 
             var payload = new
             {
@@ -320,8 +397,17 @@ namespace OpenClaw.Node.Services
                 success = result.ExitCode == 0 && !result.TimedOut,
                 stdout = result.StdOut,
                 stderr = result.StdErr,
-                error = (string?)null,
+                error = result.Error,
+                truncated = result.Truncated,
             };
+
+            await SendExecEventBestEffortAsync("exec.finished", root.Value, commandText!, new
+            {
+                exitCode = result.ExitCode,
+                timedOut = result.TimedOut,
+                success = result.ExitCode == 0 && !result.TimedOut,
+                output = string.Join(Environment.NewLine, new[] { result.StdOut, result.StdErr }.Where(value => !string.IsNullOrWhiteSpace(value))),
+            }, cancellationToken);
 
             return new BridgeInvokeResponse
             {
@@ -331,18 +417,231 @@ namespace OpenClaw.Node.Services
             };
         }
 
-        private BridgeInvokeResponse HandleSystemDescribe(BridgeInvokeRequest request)
+        private BridgeInvokeResponse HandleFsListDir(BridgeInvokeRequest request)
         {
-            var manifest = CapabilityManifestService.Build();
-            return new BridgeInvokeResponse
+            var root = ParseParams(request.ParamsJSON);
+            var requested = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (root.HasValue && root.Value.TryGetProperty("path", out var path))
             {
-                Id = request.Id,
-                Ok = true,
-                PayloadJSON = ToJson(manifest),
-            };
+                if (path.ValueKind != JsonValueKind.String) return Invalid(request.Id, "INVALID_REQUEST: fs.listDir path must be a string");
+                requested = path.GetString()?.Trim() ?? string.Empty;
+            }
+            if (string.IsNullOrWhiteSpace(requested)) requested = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!Path.IsPathFullyQualified(requested)) return Invalid(request.Id, "INVALID_REQUEST: fs.listDir path must be absolute");
+            var resolved = Path.GetFullPath(requested);
+            if (!Directory.Exists(resolved)) return Invalid(request.Id, "INVALID_REQUEST: fs.listDir path is not a readable directory");
+            var entries = new List<object>();
+            foreach (var directory in Directory.EnumerateDirectories(resolved))
+            {
+                try
+                {
+                    var info = new DirectoryInfo(directory);
+                    var hidden = info.Name.StartsWith('.') || info.Attributes.HasFlag(FileAttributes.Hidden);
+                    entries.Add(new { name = info.Name, path = info.FullName, hidden = hidden ? true : (bool?)null });
+                }
+                catch { }
+            }
+            var sorted = entries
+                .Select(value => JsonSerializer.SerializeToElement(value, JsonOptions))
+                .OrderBy(value => value.TryGetProperty("hidden", out var hidden) && hidden.ValueKind == JsonValueKind.True)
+                .ThenBy(value => value.GetProperty("name").GetString(), StringComparer.Ordinal)
+                .ToArray();
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var parent = Directory.GetParent(resolved)?.FullName;
+            return Success(request.Id, new { path = resolved, parent, home, entries = sorted });
         }
 
-        private async Task<BridgeInvokeResponse> HandleBrowserProxyAsync(BridgeInvokeRequest request)
+        private async Task<BridgeInvokeResponse> HandleScreenSnapshotAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var root = ParseParams(request.ParamsJSON);
+            var format = "jpeg";
+            var screenIndex = 0;
+            int? requestedScreenIndex = null;
+            int? requestedMaxWidth = null;
+            var quality = 0.72;
+            if (root.HasValue)
+            {
+                if (root.Value.TryGetProperty("format", out var formatElement))
+                {
+                    if (formatElement.ValueKind != JsonValueKind.String) return Invalid(request.Id, "INVALID_REQUEST: screen.snapshot format must be a string");
+                    format = (formatElement.GetString() ?? string.Empty).Trim().ToLowerInvariant();
+                    if (format == "jpg") format = "jpeg";
+                    if (format is not ("jpeg" or "png")) return Invalid(request.Id, "INVALID_REQUEST: screen.snapshot format must be jpeg or png");
+                }
+                if (root.Value.TryGetProperty("screenIndex", out var index))
+                {
+                    if (index.ValueKind != JsonValueKind.Number || !index.TryGetInt32(out screenIndex) || screenIndex < 0)
+                        return Invalid(request.Id, "INVALID_REQUEST: screen.snapshot screenIndex must be a non-negative integer");
+                    requestedScreenIndex = screenIndex;
+                }
+                if (root.Value.TryGetProperty("maxWidth", out var width))
+                {
+                    if (width.ValueKind != JsonValueKind.Number || !width.TryGetInt32(out var parsedMaxWidth) || parsedMaxWidth <= 0 || parsedMaxWidth > 8000)
+                        return Invalid(request.Id, "INVALID_REQUEST: screen.snapshot maxWidth must be between 1 and 8000");
+                    requestedMaxWidth = parsedMaxWidth;
+                }
+                if (root.Value.TryGetProperty("quality", out var qualityElement) && (qualityElement.ValueKind != JsonValueKind.Number || !qualityElement.TryGetDouble(out quality) || quality <= 0 || quality > 1))
+                    return Invalid(request.Id, "INVALID_REQUEST: screen.snapshot quality must be in (0, 1]");
+            }
+            var maxWidth = requestedMaxWidth ?? (format == "png" ? 900 : 1600);
+            var captured = await _screen.CaptureScreenshotBytesAsync(screenIndex, format == "jpeg" ? "jpg" : "png");
+            cancellationToken.ThrowIfCancellationRequested();
+            if (captured.bytes.Length == 0) return Unavailable(request.Id, "SCREEN_CAPTURE_UNAVAILABLE: capture returned no image");
+            var base64 = Convert.ToBase64String(captured.bytes);
+            var widthOut = captured.width;
+            var heightOut = captured.height;
+            var encoded = format == "jpeg"
+                ? ImageEncoding.EncodeJpegBase64(captured.bytes, maxWidth, quality)
+                : ImageEncoding.EncodePngBase64(captured.bytes, maxWidth);
+            if (!string.IsNullOrWhiteSpace(encoded.Base64))
+            {
+                base64 = encoded.Base64;
+                widthOut = encoded.Width;
+                heightOut = encoded.Height;
+            }
+            return Success(request.Id, new
+            {
+                format,
+                base64,
+                displayFrameId = Guid.NewGuid().ToString(),
+                width = widthOut,
+                height = heightOut,
+                screenIndex = requestedScreenIndex,
+                capturedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            });
+        }
+
+        private async Task<BridgeInvokeResponse> HandleCameraClipAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            var root = ParseParams(request.ParamsJSON);
+            var durationMs = 3000;
+            var facing = "front";
+            string? deviceId = null;
+            var includeAudio = true;
+            if (root.HasValue)
+            {
+                if (root.Value.TryGetProperty("durationMs", out var duration) && (duration.ValueKind != JsonValueKind.Number || !duration.TryGetInt32(out durationMs)))
+                    return Invalid(request.Id, "INVALID_REQUEST: camera.clip durationMs must be an integer");
+                if (root.Value.TryGetProperty("facing", out var facingElement))
+                {
+                    if (facingElement.ValueKind != JsonValueKind.String) return Invalid(request.Id, "INVALID_REQUEST: camera.clip facing must be a string");
+                    facing = (facingElement.GetString() ?? "front").ToLowerInvariant();
+                }
+                if (root.Value.TryGetProperty("deviceId", out var device))
+                {
+                    if (device.ValueKind != JsonValueKind.String) return Invalid(request.Id, "INVALID_REQUEST: camera.clip deviceId must be a string");
+                    deviceId = device.GetString();
+                }
+                if (root.Value.TryGetProperty("includeAudio", out var audio))
+                {
+                    if (audio.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return Invalid(request.Id, "INVALID_REQUEST: camera.clip includeAudio must be a boolean");
+                    includeAudio = audio.GetBoolean();
+                }
+                if (root.Value.TryGetProperty("format", out var format) && (format.ValueKind != JsonValueKind.String || !string.Equals(format.GetString(), "mp4", StringComparison.OrdinalIgnoreCase)))
+                    return Invalid(request.Id, "INVALID_REQUEST: camera.clip format must be mp4");
+            }
+            if (facing is not ("front" or "back")) return Invalid(request.Id, "INVALID_REQUEST: camera.clip facing must be front or back");
+            if (durationMs is < 250 || durationMs > 1000 * _settings.MaximumCameraClipSeconds)
+                return Invalid(request.Id, $"INVALID_REQUEST: camera.clip durationMs must be between 250 and {_settings.MaximumCameraClipSeconds * 1000}");
+            var result = await _camera.CaptureMp4ClipAsBase64Async(durationMs, facing, deviceId, includeAudio, cancellationToken);
+            return Success(request.Id, new { format = "mp4", base64 = result.Base64, durationMs = result.DurationMs, hasAudio = result.HasAudio });
+        }
+
+        private async Task<BridgeInvokeResponse> HandleLocationGetAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            var json = await _device.GetLocationJsonAsync(request.ParamsJSON, cancellationToken);
+            return new BridgeInvokeResponse { Id = request.Id, Ok = true, PayloadJSON = json };
+        }
+
+        private async Task<BridgeInvokeResponse> HandleCanvasPresentAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            var root = ParseParams(request.ParamsJSON);
+            var url = root.HasValue && root.Value.TryGetProperty("url", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+            CanvasService.Placement? placement = null;
+            if (root.HasValue && root.Value.TryGetProperty("placement", out var placementElement))
+            {
+                if (placementElement.ValueKind != JsonValueKind.Object)
+                    return Invalid(request.Id, "INVALID_REQUEST: canvas.present placement must be an object");
+                if (!TryReadOptionalFiniteDouble(placementElement, "x", out var x) ||
+                    !TryReadOptionalFiniteDouble(placementElement, "y", out var y) ||
+                    !TryReadOptionalFiniteDouble(placementElement, "width", out var width) ||
+                    !TryReadOptionalFiniteDouble(placementElement, "height", out var height))
+                    return Invalid(request.Id, "INVALID_REQUEST: canvas.present placement values must be finite numbers");
+                if (width is <= 0 or > 8192 || height is <= 0 or > 8192)
+                    return Invalid(request.Id, "INVALID_REQUEST: canvas.present placement size must be in (0, 8192]");
+                placement = new CanvasService.Placement(x, y, width, height);
+            }
+            await _canvas.PresentAsync(url, placement, cancellationToken);
+            return Success(request.Id, new { ok = true });
+        }
+
+        private async Task<BridgeInvokeResponse> HandleCanvasHideAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            await _canvas.HideAsync(cancellationToken);
+            return Success(request.Id, new { ok = true });
+        }
+
+        private async Task<BridgeInvokeResponse> HandleCanvasNavigateAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            var root = ParseParams(request.ParamsJSON);
+            if (!root.HasValue || !root.Value.TryGetProperty("url", out var url) || url.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(url.GetString()))
+                return Invalid(request.Id, "INVALID_REQUEST: canvas.navigate requires url");
+            await _canvas.NavigateAsync(url.GetString()!, cancellationToken);
+            return Success(request.Id, new { ok = true });
+        }
+
+        private async Task<BridgeInvokeResponse> HandleCanvasEvalAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            var root = ParseParams(request.ParamsJSON);
+            if (!root.HasValue || !root.Value.TryGetProperty("javaScript", out var script) || script.ValueKind != JsonValueKind.String)
+                return Invalid(request.Id, "INVALID_REQUEST: canvas.eval requires javaScript");
+            var result = await _canvas.EvaluateAsync(script.GetString() ?? string.Empty, cancellationToken);
+            return Success(request.Id, new { result });
+        }
+
+        private async Task<BridgeInvokeResponse> HandleCanvasSnapshotAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            var root = ParseParams(request.ParamsJSON);
+            var format = root.HasValue && root.Value.TryGetProperty("format", out var value) && value.ValueKind == JsonValueKind.String
+                ? (value.GetString() ?? "jpeg").ToLowerInvariant()
+                : "jpeg";
+            if (format == "jpg") format = "jpeg";
+            if (format is not ("jpeg" or "png")) return Invalid(request.Id, "INVALID_REQUEST: canvas.snapshot format must be jpeg or png");
+            var maxWidth = format == "png" ? 900 : 1600;
+            var quality = 0.9;
+            if (root.HasValue && root.Value.TryGetProperty("maxWidth", out var maxWidthElement) &&
+                (maxWidthElement.ValueKind != JsonValueKind.Number || !maxWidthElement.TryGetInt32(out maxWidth) || maxWidth <= 0 || maxWidth > 8000))
+                return Invalid(request.Id, "INVALID_REQUEST: canvas.snapshot maxWidth must be between 1 and 8000");
+            if (root.HasValue && root.Value.TryGetProperty("quality", out var qualityElement) &&
+                (qualityElement.ValueKind != JsonValueKind.Number || !qualityElement.TryGetDouble(out quality) || !double.IsFinite(quality) || quality <= 0 || quality > 1))
+                return Invalid(request.Id, "INVALID_REQUEST: canvas.snapshot quality must be in (0, 1]");
+            var snapshot = await _canvas.SnapshotAsync(format == "jpeg" ? "jpg" : "png", cancellationToken);
+            var encoded = format == "jpeg"
+                ? ImageEncoding.EncodeJpegBase64(snapshot.Bytes, maxWidth, quality)
+                : ImageEncoding.EncodePngBase64(snapshot.Bytes, maxWidth);
+            var base64 = string.IsNullOrWhiteSpace(encoded.Base64) ? Convert.ToBase64String(snapshot.Bytes) : encoded.Base64;
+            return Success(request.Id, new { format, base64 });
+        }
+
+        private async Task<BridgeInvokeResponse> HandleCanvasA2UiPushAsync(BridgeInvokeRequest request, bool preferJsonl, CancellationToken cancellationToken)
+        {
+            var root = ParseParams(request.ParamsJSON);
+            if (!root.HasValue) return Invalid(request.Id, "INVALID_REQUEST: A2UI payload required");
+            var messages = root.Value.TryGetProperty("messages", out var values) ? values.GetRawText() : null;
+            var jsonl = root.Value.TryGetProperty("jsonl", out var lines) && lines.ValueKind == JsonValueKind.String ? lines.GetString() : null;
+            if (preferJsonl && string.IsNullOrWhiteSpace(jsonl)) return Invalid(request.Id, "INVALID_REQUEST: canvas.a2ui.pushJSONL requires jsonl");
+            var result = await _canvas.PushA2UiAsync(messages, jsonl, cancellationToken);
+            return new BridgeInvokeResponse { Id = request.Id, Ok = true, PayloadJSON = result };
+        }
+
+        private async Task<BridgeInvokeResponse> HandleCanvasA2UiResetAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            var result = await _canvas.ResetA2UiAsync(cancellationToken);
+            return new BridgeInvokeResponse { Id = request.Id, Ok = true, PayloadJSON = result };
+        }
+
+        private async Task<BridgeInvokeResponse> HandleBrowserProxyAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
         {
             if (_browserProxy == null)
             {
@@ -406,7 +705,7 @@ namespace OpenClaw.Node.Services
                 Body = root.Value.TryGetProperty("body", out var bodyEl) ? bodyEl.Clone() : null,
             };
 
-            var payloadJson = await _browserProxy.ProxyAsync(proxyRequest);
+            var payloadJson = await _browserProxy.ProxyAsync(proxyRequest, cancellationToken);
             return new BridgeInvokeResponse
             {
                 Id = request.Id,
@@ -947,7 +1246,7 @@ namespace OpenClaw.Node.Services
             };
         }
 
-        private async Task<BridgeInvokeResponse> HandleScreenRecordAsync(BridgeInvokeRequest request)
+        private async Task<BridgeInvokeResponse> HandleScreenRecordAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
         {
             var root = ParseParams(request.ParamsJSON);
 
@@ -959,6 +1258,12 @@ namespace OpenClaw.Node.Services
             if (root != null && root.Value.TryGetProperty("fps", out var fpsEl) && fpsEl.ValueKind != JsonValueKind.Number)
             {
                 return Invalid(request.Id, "screen.record params.fps must be a number");
+            }
+
+            if (root != null && root.Value.TryGetProperty("format", out var formatEl) &&
+                (formatEl.ValueKind != JsonValueKind.String || !string.Equals(formatEl.GetString(), "mp4", StringComparison.OrdinalIgnoreCase)))
+            {
+                return Invalid(request.Id, "INVALID_REQUEST: screen.record format must be mp4");
             }
 
             if (root != null && root.Value.TryGetProperty("includeAudio", out var audioEl) &&
@@ -995,21 +1300,27 @@ namespace OpenClaw.Node.Services
                 {
                     return Invalid(request.Id, "screen.record params.durationMs must be > 0");
                 }
+
+                if (durationMs > _settings.MaximumScreenRecordSeconds * 1000)
+                {
+                    return Invalid(request.Id, $"screen.record duration exceeds configured maximum of {_settings.MaximumScreenRecordSeconds} seconds");
+                }
             }
 
-            var fps = 10;
+            var requestedFps = 10d;
             if (root != null && root.Value.TryGetProperty("fps", out var f) && f.ValueKind == JsonValueKind.Number)
             {
-                if (!f.TryGetInt32(out fps))
+                if (!f.TryGetDouble(out requestedFps) || !double.IsFinite(requestedFps))
                 {
-                    return Invalid(request.Id, "screen.record params.fps must be a 32-bit integer");
+                    return Invalid(request.Id, "screen.record params.fps must be a finite number");
                 }
 
-                if (fps <= 0)
+                if (requestedFps <= 0 || requestedFps > 60)
                 {
-                    return Invalid(request.Id, "screen.record params.fps must be > 0");
+                    return Invalid(request.Id, "screen.record params.fps must be in (0, 60]");
                 }
             }
+            var captureFps = Math.Clamp((int)Math.Round(requestedFps, MidpointRounding.AwayFromZero), 1, 60);
 
             var includeAudio = root != null && root.Value.TryGetProperty("includeAudio", out var a) &&
                                (a.ValueKind == JsonValueKind.True || a.ValueKind == JsonValueKind.False)
@@ -1042,14 +1353,14 @@ namespace OpenClaw.Node.Services
             try
             {
                 var svc = new ScreenCaptureService();
-                var record = await svc.RecordScreenAsBase64Async(durationMs, fps, includeAudio, screenIndex, captureApi, lowLatency);
+                var record = await svc.RecordScreenAsBase64Async(durationMs, captureFps, includeAudio, screenIndex, captureApi, lowLatency, cancellationToken);
 
                 var payload = new
                 {
                     format = "mp4",
                     base64 = record.Base64,
                     durationMs,
-                    fps,
+                    fps = requestedFps,
                     screenIndex,
                     hasAudio = includeAudio,
                     captureApi = record.CaptureApi,
@@ -1063,6 +1374,10 @@ namespace OpenClaw.Node.Services
                     Ok = true,
                     PayloadJSON = ToJson(payload)
                 };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -1079,12 +1394,11 @@ namespace OpenClaw.Node.Services
             }
         }
 
-        private async Task<BridgeInvokeResponse> HandleCameraListAsync(BridgeInvokeRequest request)
+        private async Task<BridgeInvokeResponse> HandleCameraListAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
         {
             try
             {
-                var svc = new CameraCaptureService();
-                var devices = await svc.ListDevicesAsync();
+                var devices = await _camera.ListDevicesAsync(cancellationToken);
 
                 var payload = new
                 {
@@ -1097,6 +1411,10 @@ namespace OpenClaw.Node.Services
                     Ok = true,
                     PayloadJSON = ToJson(payload)
                 };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch
             {
@@ -1111,9 +1429,22 @@ namespace OpenClaw.Node.Services
             }
         }
 
-        private async Task<BridgeInvokeResponse> HandleCameraSnapAsync(BridgeInvokeRequest request)
+        private async Task<BridgeInvokeResponse> HandleCameraSnapAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
         {
             var root = ParseParams(request.ParamsJSON);
+
+            if (root.HasValue && root.Value.TryGetProperty("facing", out var facingValue) && facingValue.ValueKind != JsonValueKind.String)
+                return Invalid(request.Id, "INVALID_REQUEST: camera.snap facing must be a string");
+            if (root.HasValue && root.Value.TryGetProperty("format", out var formatValue) && formatValue.ValueKind != JsonValueKind.String)
+                return Invalid(request.Id, "INVALID_REQUEST: camera.snap format must be a string");
+            if (root.HasValue && root.Value.TryGetProperty("maxWidth", out var maxWidthValue) && maxWidthValue.ValueKind != JsonValueKind.Number)
+                return Invalid(request.Id, "INVALID_REQUEST: camera.snap maxWidth must be an integer");
+            if (root.HasValue && root.Value.TryGetProperty("quality", out var qualityValue) && qualityValue.ValueKind != JsonValueKind.Number)
+                return Invalid(request.Id, "INVALID_REQUEST: camera.snap quality must be a number");
+            if (root.HasValue && root.Value.TryGetProperty("delayMs", out var delayValue) && delayValue.ValueKind != JsonValueKind.Number)
+                return Invalid(request.Id, "INVALID_REQUEST: camera.snap delayMs must be an integer");
+            if (root.HasValue && root.Value.TryGetProperty("deviceId", out var deviceValue) && deviceValue.ValueKind != JsonValueKind.String)
+                return Invalid(request.Id, "INVALID_REQUEST: camera.snap deviceId must be a string");
 
             var facing = root != null && root.Value.TryGetProperty("facing", out var f) && f.ValueKind == JsonValueKind.String
                 ? (f.GetString() ?? "front")
@@ -1125,12 +1456,13 @@ namespace OpenClaw.Node.Services
                 return Invalid(request.Id, "camera.snap params.facing must be 'front' or 'back'");
             }
 
+            var outputFormat = "jpg";
             if (root != null && root.Value.TryGetProperty("format", out var formatEl) && formatEl.ValueKind == JsonValueKind.String)
             {
-                var format = formatEl.GetString();
-                if (!string.IsNullOrWhiteSpace(format) && !string.Equals(format, "jpg", StringComparison.OrdinalIgnoreCase))
+                outputFormat = (formatEl.GetString() ?? "jpg").Trim().ToLowerInvariant();
+                if (outputFormat is not ("jpg" or "jpeg"))
                 {
-                    return Invalid(request.Id, "camera.snap params.format must be 'jpg'");
+                    return Invalid(request.Id, "camera.snap params.format must be 'jpg' or 'jpeg'");
                 }
             }
 
@@ -1143,9 +1475,9 @@ namespace OpenClaw.Node.Services
                 }
 
                 maxWidth = parsedMaxWidth;
-                if (maxWidth.Value <= 0)
+                if (maxWidth.Value <= 0 || maxWidth.Value > 8000)
                 {
-                    return Invalid(request.Id, "camera.snap params.maxWidth must be > 0");
+                    return Invalid(request.Id, "camera.snap params.maxWidth must be between 1 and 8000");
                 }
             }
 
@@ -1153,12 +1485,12 @@ namespace OpenClaw.Node.Services
                 ? q.GetDouble()
                 : (double?)null;
 
-            if (quality.HasValue && (quality.Value < 0 || quality.Value > 1))
+            if (quality.HasValue && (!double.IsFinite(quality.Value) || quality.Value < 0 || quality.Value > 1))
             {
                 return Invalid(request.Id, "camera.snap params.quality must be between 0 and 1");
             }
 
-            int? delayMs = null;
+            int? delayMs = 2000;
             if (root != null && root.Value.TryGetProperty("delayMs", out var d) && d.ValueKind == JsonValueKind.Number)
             {
                 if (!d.TryGetInt32(out var parsedDelayMs))
@@ -1177,16 +1509,18 @@ namespace OpenClaw.Node.Services
                 ? id.GetString()
                 : null;
 
+            maxWidth ??= 1600;
+            quality ??= 0.9;
+
             try
             {
-                var svc = new CameraCaptureService();
-                var (base64, width, height) = await svc.CaptureJpegAsBase64Async(facing.ToLowerInvariant(), maxWidth, quality, delayMs, deviceId);
+                var (base64, width, height) = await _camera.CaptureJpegAsBase64Async(facing.ToLowerInvariant(), maxWidth, quality, delayMs, deviceId, cancellationToken);
 
                 if (OperatingSystem.IsWindows() && width <= 1 && height <= 1)
                 {
-                    var reason = string.IsNullOrWhiteSpace(svc.LastError) ?
+                    var reason = string.IsNullOrWhiteSpace(_camera.LastError) ?
                         "Camera capture unavailable. Check Windows Settings > Privacy & security > Camera, enable 'Camera access' and 'Let desktop apps access your camera'." :
-                        $"Camera capture unavailable: {svc.LastError}. Check Windows Settings > Privacy & security > Camera and enable desktop app camera access.";
+                        $"Camera capture unavailable: {_camera.LastError}. Check Windows Settings > Privacy & security > Camera and enable desktop app camera access.";
 
                     return new BridgeInvokeResponse
                     {
@@ -1202,7 +1536,7 @@ namespace OpenClaw.Node.Services
 
                 var payload = new
                 {
-                    format = "jpg",
+                    format = outputFormat,
                     base64,
                     width,
                     height
@@ -1214,6 +1548,10 @@ namespace OpenClaw.Node.Services
                     Ok = true,
                     PayloadJSON = ToJson(payload)
                 };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -2087,18 +2425,10 @@ namespace OpenClaw.Node.Services
             if (root.Value.TryGetProperty("bins", out var binsEl))
             {
                 if (binsEl.ValueKind != JsonValueKind.Array) return Array.Empty<string>();
-                var bins = binsEl.EnumerateArray()
-                    .Where(x => x.ValueKind == JsonValueKind.String)
-                    .Select(x => (x.GetString() ?? string.Empty).Trim())
-                    .Where(x => !string.IsNullOrWhiteSpace(x))
-                    .ToArray();
-                return bins;
-            }
-
-            if (root.Value.TryGetProperty("command", out var commandEl) && commandEl.ValueKind == JsonValueKind.String)
-            {
-                var command = (commandEl.GetString() ?? string.Empty).Trim();
-                return string.IsNullOrWhiteSpace(command) ? Array.Empty<string>() : new[] { command };
+                var values = binsEl.EnumerateArray().ToArray();
+                if (values.Length is 0 or > 64 || values.Any(value => value.ValueKind != JsonValueKind.String)) return Array.Empty<string>();
+                var bins = values.Select(value => (value.GetString() ?? string.Empty).Trim()).ToArray();
+                return bins.Any(value => value.Length is 0 or > 260) ? Array.Empty<string>() : bins;
             }
 
             return null;
@@ -2158,55 +2488,7 @@ namespace OpenClaw.Node.Services
                 return TryBuildSystemRunDisplay(requestId, fileName, args, rawCommand, true, out commandText, out commandPreview, out invalid);
             }
 
-            if (commandEl.ValueKind == JsonValueKind.String)
-            {
-                var command = commandEl.GetString();
-                if (string.IsNullOrWhiteSpace(command))
-                {
-                    invalid = Invalid(requestId, "system.run command string cannot be empty");
-                    return false;
-                }
-
-                var hasLegacyArgs = root.TryGetProperty("args", out var argsEl);
-                if (hasLegacyArgs)
-                {
-                    if (argsEl.ValueKind != JsonValueKind.Array)
-                    {
-                        invalid = Invalid(requestId, "system.run params.args must be a string[] when provided");
-                        return false;
-                    }
-
-                    var parsedArgs = new List<string>();
-                    foreach (var part in argsEl.EnumerateArray())
-                    {
-                        if (part.ValueKind != JsonValueKind.String)
-                        {
-                            invalid = Invalid(requestId, "system.run params.args entries must be strings");
-                            return false;
-                        }
-
-                        parsedArgs.Add(part.GetString() ?? string.Empty);
-                    }
-
-                    fileName = command.Trim();
-                    args = parsedArgs.ToArray();
-                    return TryBuildSystemRunDisplay(requestId, fileName, args, rawCommand, true, out commandText, out commandPreview, out invalid);
-                }
-
-                if (OperatingSystem.IsWindows())
-                {
-                    fileName = "cmd.exe";
-                    args = new[] { "/d", "/s", "/c", command };
-                }
-                else
-                {
-                    fileName = "bash";
-                    args = new[] { "-lc", command };
-                }
-                return TryBuildSystemRunDisplay(requestId, fileName, args, rawCommand, true, out commandText, out commandPreview, out invalid);
-            }
-
-            invalid = Invalid(requestId, "system.run params.command must be string or string[]");
+            invalid = Invalid(requestId, "system.run params.command must be a non-empty string array");
             return false;
         }
 
@@ -2339,6 +2621,20 @@ namespace OpenClaw.Node.Services
             }
         };
 
+        private static BridgeInvokeResponse Unavailable(string id, string message) => new()
+        {
+            Id = id,
+            Ok = false,
+            Error = new OpenClawNodeError { Code = OpenClawNodeErrorCode.Unavailable, Message = message },
+        };
+
+        private static BridgeInvokeResponse Success(string id, object? payload) => new()
+        {
+            Id = id,
+            Ok = true,
+            PayloadJSON = ToJson(payload),
+        };
+
         private static Dictionary<string, string>? ReadQuery(JsonElement root)
         {
             if (!root.TryGetProperty("query", out var queryEl) || queryEl.ValueKind != JsonValueKind.Object)
@@ -2365,18 +2661,172 @@ namespace OpenClaw.Node.Services
             return dict.Count == 0 ? null : dict;
         }
 
+        private static bool TryReadOptionalFiniteDouble(JsonElement root, string name, out double? value)
+        {
+            value = null;
+            if (!root.TryGetProperty(name, out var property)) return true;
+            if (property.ValueKind != JsonValueKind.Number || !property.TryGetDouble(out var parsed) || !double.IsFinite(parsed)) return false;
+            value = parsed;
+            return true;
+        }
+
         private static JsonElement? ParseParams(string? paramsJson)
         {
             if (string.IsNullOrWhiteSpace(paramsJson)) return null;
             using var doc = JsonDocument.Parse(paramsJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new JsonException("INVALID_REQUEST: params must be a JSON object");
             return doc.RootElement.Clone();
+        }
+
+        private static bool ValidateSystemRunPlan(
+            JsonElement root,
+            string[] argv,
+            string commandText,
+            string? cwd,
+            string requestId,
+            out BridgeInvokeResponse? invalid)
+        {
+            invalid = null;
+            if (!root.TryGetProperty("systemRunPlan", out var plan) || plan.ValueKind == JsonValueKind.Null) return true;
+            if (plan.ValueKind != JsonValueKind.Object)
+            {
+                invalid = Invalid(requestId, "INVALID_REQUEST: systemRunPlan must be an object");
+                return false;
+            }
+            if (!plan.TryGetProperty("argv", out var plannedArgv) || plannedArgv.ValueKind != JsonValueKind.Array)
+            {
+                invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: execution plan is missing argv binding");
+                return false;
+            }
+            var planned = plannedArgv.EnumerateArray().ToArray();
+            if (planned.Length != argv.Length || planned.Where((entry, index) => entry.ValueKind != JsonValueKind.String || entry.GetString() != argv[index]).Any())
+            {
+                invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: command changed after preparation");
+                return false;
+            }
+            if (plan.TryGetProperty("commandText", out var plannedText) &&
+                (plannedText.ValueKind != JsonValueKind.String || plannedText.GetString() != commandText))
+            {
+                invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: command text changed after preparation");
+                return false;
+            }
+            if (plan.TryGetProperty("cwd", out var plannedCwd))
+            {
+                var value = plannedCwd.ValueKind == JsonValueKind.String ? NormalizeNullableString(plannedCwd.GetString()) : null;
+                if (!string.Equals(value, cwd, StringComparison.OrdinalIgnoreCase))
+                {
+                    invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: working directory changed after preparation");
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool TryReadSystemRunEnvironment(
+            JsonElement root,
+            string requestId,
+            string[] argv,
+            out Dictionary<string, string>? environment,
+            out BridgeInvokeResponse? invalid)
+        {
+            environment = null;
+            invalid = null;
+            if (!root.TryGetProperty("env", out var env) || env.ValueKind == JsonValueKind.Null) return true;
+            if (env.ValueKind != JsonValueKind.Object)
+            {
+                invalid = Invalid(requestId, "INVALID_REQUEST: system.run params.env must be an object of strings");
+                return false;
+            }
+            var entries = env.EnumerateObject().ToArray();
+            if (entries.Length > 128)
+            {
+                invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: too many environment overrides");
+                return false;
+            }
+            var shell = Path.GetFileNameWithoutExtension(argv[0]).ToLowerInvariant();
+            if (entries.Length > 0 && shell is "cmd" or "powershell" or "pwsh")
+            {
+                invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: environment overrides are not allowed for shell wrappers");
+                return false;
+            }
+            var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "PATH", "PATHEXT", "COMSPEC", "PSMODULEPATH", "SYSTEMROOT", "WINDIR",
+            };
+            var parsed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in entries)
+            {
+                if (!IsPortableEnvironmentName(entry.Name) || blocked.Contains(entry.Name) || entry.Name.StartsWith("OPENCLAW_", StringComparison.OrdinalIgnoreCase))
+                {
+                    invalid = Invalid(requestId, $"SYSTEM_RUN_DENIED: environment override rejected ({entry.Name})");
+                    return false;
+                }
+                if (entry.Value.ValueKind != JsonValueKind.String)
+                {
+                    invalid = Invalid(requestId, $"INVALID_REQUEST: environment override {entry.Name} must be a string");
+                    return false;
+                }
+                var value = entry.Value.GetString() ?? string.Empty;
+                if (value.Length > 32 * 1024)
+                {
+                    invalid = Invalid(requestId, $"SYSTEM_RUN_DENIED: environment override {entry.Name} is too large");
+                    return false;
+                }
+                parsed[entry.Name] = value;
+            }
+            environment = parsed;
+            return true;
+        }
+
+        private static bool IsPortableEnvironmentName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || !(char.IsAsciiLetter(name[0]) || name[0] == '_')) return false;
+            return name.Skip(1).All(character => char.IsAsciiLetterOrDigit(character) || character == '_');
+        }
+
+        private async Task SendExecEventBestEffortAsync(
+            string eventName,
+            JsonElement root,
+            string commandText,
+            object details,
+            CancellationToken cancellationToken)
+        {
+            if (_rpc == null) return;
+            try
+            {
+                var payload = new Dictionary<string, object?>
+                {
+                    ["sessionKey"] = root.TryGetProperty("sessionKey", out var session) && session.ValueKind == JsonValueKind.String ? session.GetString() : string.Empty,
+                    ["runId"] = root.TryGetProperty("runId", out var run) && run.ValueKind == JsonValueKind.String ? run.GetString() : Guid.NewGuid().ToString("N"),
+                    ["host"] = "node",
+                    ["command"] = commandText,
+                    ["suppressNotifyOnExit"] = root.TryGetProperty("suppressNotifyOnExit", out var suppress) && suppress.ValueKind is JsonValueKind.True or JsonValueKind.False && suppress.GetBoolean(),
+                };
+                foreach (var property in JsonSerializer.SerializeToElement(details, JsonOptions).EnumerateObject())
+                {
+                    payload[property.Name] = property.Value.Clone();
+                }
+                await _rpc.SendRequestAsync("node.event", new
+                {
+                    @event = eventName,
+                    payloadJSON = ToJson(payload),
+                }, cancellationToken);
+            }
+            catch
+            {
+                // Exec completion is authoritative in node.invoke.result; the
+                // lifecycle event is best-effort, matching the Gateway host.
+            }
         }
 
         private static async Task<ProcessResult> RunProcessAsync(
             string fileName,
             string[] args,
             string? workingDirectory = null,
-            int? timeoutMs = null)
+            int? timeoutMs = null,
+            CancellationToken cancellationToken = default,
+            IReadOnlyDictionary<string, string>? environment = null)
         {
             var psi = new ProcessStartInfo
             {
@@ -2387,6 +2837,12 @@ namespace OpenClaw.Node.Services
                 CreateNoWindow = true,
             };
 
+            ChildProcessSecurity.ScrubSensitiveEnvironment(psi);
+            if (environment != null)
+            {
+                foreach (var pair in environment) psi.Environment[pair.Key] = pair.Value;
+            }
+
             if (!string.IsNullOrWhiteSpace(workingDirectory))
             {
                 psi.WorkingDirectory = workingDirectory;
@@ -2396,20 +2852,23 @@ namespace OpenClaw.Node.Services
 
             using var process = new Process { StartInfo = psi };
             process.Start();
-            var stdOutTask = process.StandardOutput.ReadToEndAsync();
-            var stdErrTask = process.StandardError.ReadToEndAsync();
+            var outputBudget = new OutputBudget(200_000);
+            var stdOutTask = ReadCappedAsync(process.StandardOutput, outputBudget);
+            var stdErrTask = ReadCappedAsync(process.StandardError, outputBudget);
 
             var timedOut = false;
-            if (timeoutMs.HasValue)
+            var cancelled = false;
+            using (var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                using var timeoutCts = new CancellationTokenSource(timeoutMs.Value);
+                if (timeoutMs.HasValue) waitCts.CancelAfter(timeoutMs.Value);
                 try
                 {
-                    await process.WaitForExitAsync(timeoutCts.Token);
+                    await process.WaitForExitAsync(waitCts.Token);
                 }
-                catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+                catch (OperationCanceledException)
                 {
-                    timedOut = true;
+                    timedOut = !cancellationToken.IsCancellationRequested;
+                    cancelled = cancellationToken.IsCancellationRequested;
                     try
                     {
                         if (!process.HasExited)
@@ -2432,20 +2891,18 @@ namespace OpenClaw.Node.Services
                     }
                 }
             }
-            else
-            {
-                await process.WaitForExitAsync();
-            }
 
             var stdOut = await stdOutTask;
             var stdErr = await stdErrTask;
 
             return new ProcessResult
             {
-                ExitCode = timedOut ? -1 : process.ExitCode,
-                StdOut = stdOut,
-                StdErr = stdErr,
+                ExitCode = timedOut || cancelled ? -1 : process.ExitCode,
+                StdOut = stdOut.Text,
+                StdErr = stdErr.Text,
                 TimedOut = timedOut,
+                Error = cancelled ? "cancelled" : null,
+                Truncated = stdOut.Truncated || stdErr.Truncated,
             };
         }
 
@@ -2458,6 +2915,69 @@ namespace OpenClaw.Node.Services
             public string StdOut { get; set; } = string.Empty;
             public string StdErr { get; set; } = string.Empty;
             public bool TimedOut { get; set; }
+            public string? Error { get; set; }
+            public bool Truncated { get; set; }
+        }
+
+        private sealed class OutputBudget
+        {
+            public OutputBudget(int remaining) => Remaining = remaining;
+            public int Remaining;
+        }
+
+        private sealed record CappedOutput(string Text, bool Truncated);
+
+        private static async Task<CappedOutput> ReadCappedAsync(TextReader reader, OutputBudget budget)
+        {
+            var builder = new System.Text.StringBuilder();
+            var buffer = new char[4096];
+            var truncated = false;
+            while (true)
+            {
+                var count = await reader.ReadAsync(buffer, 0, buffer.Length);
+                if (count == 0) break;
+                var allowed = 0;
+                while (true)
+                {
+                    var remaining = Volatile.Read(ref budget.Remaining);
+                    if (remaining <= 0) break;
+                    var requested = Math.Min(remaining, count);
+                    if (Interlocked.CompareExchange(ref budget.Remaining, remaining - requested, remaining) == remaining)
+                    {
+                        allowed = requested;
+                        break;
+                    }
+                }
+                if (allowed > 0) builder.Append(buffer, 0, allowed);
+                if (allowed < count) truncated = true;
+            }
+            return new CappedOutput(builder.ToString(), truncated);
+        }
+
+        private static OpenClawNodeErrorCode MapExceptionCode(Exception exception)
+        {
+            var message = exception.Message ?? string.Empty;
+            if (exception is JsonException || message.StartsWith("INVALID_REQUEST", StringComparison.OrdinalIgnoreCase))
+                return OpenClawNodeErrorCode.InvalidRequest;
+            if (message.StartsWith("SYSTEM_RUN_DENIED", StringComparison.OrdinalIgnoreCase))
+                return OpenClawNodeErrorCode.SystemRunDenied;
+            if (message.StartsWith("MIC_PERMISSION_REQUIRED", StringComparison.OrdinalIgnoreCase))
+                return OpenClawNodeErrorCode.MicPermissionRequired;
+            if (message.StartsWith("MIC_BUSY", StringComparison.OrdinalIgnoreCase))
+                return OpenClawNodeErrorCode.MicBusy;
+            if (message.StartsWith("PTT_BUSY", StringComparison.OrdinalIgnoreCase))
+                return OpenClawNodeErrorCode.PttBusy;
+            if (message.StartsWith("NODE_BACKGROUND_UNAVAILABLE", StringComparison.OrdinalIgnoreCase))
+                return OpenClawNodeErrorCode.BackgroundUnavailable;
+            if (exception is TimeoutException or OperationCanceledException)
+                return OpenClawNodeErrorCode.Timeout;
+            return OpenClawNodeErrorCode.Unavailable;
+        }
+
+        public void Dispose()
+        {
+            _talk.Dispose();
+            _canvas.Dispose();
         }
     }
 }
