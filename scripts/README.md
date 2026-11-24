@@ -1,23 +1,27 @@
-# Companion maintenance
+# Development builds
 
-For an installed node, use the tray's **Check for updates...** command. To move an existing node or add another Windows PC, follow the [release installer instructions](../README.md#install-or-update-on-windows-x64). Do not run the checkout updater on an installed node: it starts a separate source copy.
+Installed nodes update from the tray. To add or migrate a Windows PC, follow the [release installer instructions](../README.md#install-or-update-on-windows-x64). The script here is only for development checkouts.
 
-## Update a Windows source checkout
+## Build a branch
 
 From PowerShell in the companion checkout:
 
 ```powershell
-.\scripts\update-companion.ps1
+.\scripts\build-dev.ps1                                # Build origin/dev and start its tray
+.\scripts\build-dev.ps1 -Branch feature/my-change      # Build and start a different branch
+.\scripts\build-dev.ps1 -BuildOnly                     # Build dev without stopping or starting a tray
 ```
 
-Requires Git, the .NET 8 SDK, an interactive Windows desktop, and a clean `main` checkout. If the existing tray app is elevated, Windows may prompt for permission to identify and stop it. Only that stop operation is elevated; the build and new tray inherit your PowerShell's privileges. `-WhatIf` previews the operation without stopping, fetching, building or starting anything.
+Requires Git, the .NET 8 SDK, and a clean checkout on a local branch. Starting a tray also requires an interactive Windows desktop. Use `-WhatIf` to preview the selected branch and operation without fetching or changing anything.
 
-The updater fetches `origin/main` before downtime. It refuses local-only commits or divergence. It then stops this checkout's Release companion and bundled Node worker, fast-forwards to the fetched commit, builds **x64 Release / net8.0-windows**, and starts the new tray app from:
+The script fetches the exact branch from `origin`, switches the checkout to it (creating a tracking branch if needed), and fast-forwards to the fetched commit. It leaves the checkout on that branch. It rejects `main`, missing remote branches, uncommitted changes, and a selected branch with local-only or diverged commits. Nothing is pushed. To test uncommitted work, build directly with `dotnet build` on your development branch.
+
+By default it stops only this checkout's tray and bundled Node worker, builds **x64 Release / net8.0-windows**, and starts the new tray from:
 
 ```text
 src\OpenClaw.Node\bin\x64\Release\net8.0-windows\OpenClaw.Node.exe
 ```
 
-Shortcuts stay valid. A missing or outdated bundled `node.exe` is restored at build time from nodejs.org and SHA-256 checked against the repository pin. If the update fails before the build, the updater tries to restart the previously running app. If the build fails, it does **not** start a possibly partial Release; fix the error and rerun. Application logs are under `%LOCALAPPDATA%\OpenClaw Companion\logs`.
+If the installed companion is running, use `-BuildOnly` (also works with `-Branch`). This leaves the installed node connected and does not launch a duplicate. Build-only mode refuses to overwrite a running checkout build. A normal rebuild may request permission to stop an elevated source tray, but does not elevate the build or the new tray.
 
-You don't need a watchdog. Use **Settings → Start with Windows** for sign-in startup. If another PC still uses the old scheduled task, disable and stop **OpenClawNodeWatchdog** there once, before updating. The updater does not change scheduled tasks or Windows startup settings.
+The bundled `node.exe` is checked against the selected branch's SHA-256 pin and restored if necessary. A failed build never starts partial output. The script does not change shortcuts, scheduled tasks or Windows startup settings.

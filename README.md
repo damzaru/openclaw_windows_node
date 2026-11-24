@@ -22,7 +22,7 @@ To migrate an existing node without pairing it again:
 
 If the installed copy does not reconnect, exit it before restarting the old copy. A change of install location does not require deleting credentials or generating a new identity.
 
-Choose **Check for updates...** from the installed tray. After the download is verified, choose **Yes** to restart and briefly disconnect, or **No** to keep working. Background checks can stage updates but do not restart the app. **Copy Diagnostics → windowsPackage** identifies the installed package without adding another version to the tray. A source build reports `source` and uses the [checkout updater](scripts/README.md).
+Choose **Check for updates...** from the installed tray. After the download is verified, choose **Yes** to restart and briefly disconnect, or **No** to keep working. Background checks can stage updates but do not restart the app. **Copy Diagnostics → windowsPackage** identifies the installed package without adding another version to the tray. A [development checkout](scripts/README.md) reports `source`.
 
 Each release includes Sigstore signatures for Setup and the update feed; these are not Windows Authenticode signatures. For initial installation, obtain Setup only from this repository's release page and verify its provenance before running it. With Cosign installed, download the matching `OpenClawCompanion-Setup.exe.sigstore.json` and run this in the download folder (substitute the public repository URL, without a trailing slash):
 
@@ -249,7 +249,9 @@ Same-user compatibility clients read `%LOCALAPPDATA%\OpenClaw Companion\ipc-cred
 
 ## Build and test
 
-For a companion launched **from a checkout**, run `.\scripts\update-companion.ps1` from PowerShell. It fast-forwards `main`, rebuilds in the existing Release folder and starts the tray app. See [Companion maintenance](scripts/README.md) for prerequisites and failure handling. An installed release updates from its tray.
+Develop and test on `dev` or a feature branch. Merge into `main` only after the build on `dev` has been tested and approved as stable; a push to `main` triggers the release workflow.
+
+From a clean checkout, run `.\scripts\build-dev.ps1` to build and start `dev`, or pass `-Branch feature/my-change` to select another remote branch. Add `-BuildOnly` if the installed companion is running and should stay running. See the [development build guide](scripts/README.md) for details.
 
 Restore and run the full test suite:
 

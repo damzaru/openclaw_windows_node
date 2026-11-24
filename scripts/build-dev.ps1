@@ -1,6 +1,9 @@
 #Requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess)]
-param()
+param(
+    [ValidateNotNullOrEmpty()][string]$Branch = 'dev',
+    [switch]$BuildOnly
+)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Get-Item -LiteralPath $PSScriptRoot).Parent.FullName
@@ -85,8 +88,18 @@ function Ensure-BrowserRuntime {
     }
 }
 
-if (!$PSCmdlet.ShouldProcess($exe, 'Stop companion, fast-forward main from origin, build x64 Release, and start the new tray app')) { return }
-Get-Command git,dotnet -CommandType Application -ErrorAction Stop | Out-Null
+if ($Branch -ieq 'main') { throw 'main is release-only. Select dev or another development branch.' }
+if ($Branch.StartsWith('-') -or $Branch.StartsWith('refs/') -or $Branch -in '@','HEAD') {
+    throw 'Supply a branch name, not an option, ref, or revision.'
+}
+$localRef = "refs/heads/$Branch"
+$remoteRef = "refs/remotes/origin/$Branch"
+Get-Command git -CommandType Application -ErrorAction Stop | Out-Null
+& git check-ref-format $localRef
+if ($LASTEXITCODE -ne 0) { throw 'Invalid Git branch name.' }
+$action = if ($BuildOnly) { 'build only (no stop/start)' } else { 'rebuild and start this checkout''s tray' }
+if (!$PSCmdlet.ShouldProcess($repo, "Switch to $Branch, fast-forward from origin/$Branch, and $action")) { return }
+Get-Command dotnet -CommandType Application -ErrorAction Stop | Out-Null
 # Prevent simultaneous invocations racing the checkout or the running tray process.
 $mutex = [Threading.Mutex]::new($false, 'Local\OpenClawCompanionReleaseUpdate')
 $locked = $false
@@ -95,16 +108,38 @@ try {
     try { $locked = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $locked = $true }
     if (!$locked) { throw 'Another companion update is already running.' }
     if ((Invoke-Git rev-parse --show-toplevel) -replace '/', '\' -ne $repo) { throw 'Run this script from the companion checkout.' }
-    if ((Invoke-Git branch --show-current) -ne 'main') { throw 'Switch to main before updating. No app was stopped.' }
+    $current = Invoke-Git branch --show-current
+    if (!$current) { throw 'Detached HEAD: switch to a local branch first. No app was stopped.' }
     if (Invoke-Git status --porcelain --untracked-files=normal) { throw 'Commit or stash local changes first. No app was stopped.' }
-    # Fetch before downtime, and refuse to build a local-only or diverged main.
-    Invoke-Git fetch origin main
-    Invoke-Git merge-base --is-ancestor HEAD FETCH_HEAD
-    $target = Invoke-Git rev-parse FETCH_HEAD
     $running = @(Get-InstalledProcess $exe -IncludeUnknown)
-    if (@($running | Where-Object { !$_.Path }).Count) {
+    if ($BuildOnly -and $running.Count) { throw 'Cannot overwrite a running or unidentified checkout build. Exit its tray first.' }
+    if (!$BuildOnly -and @(Get-Process -Name OpenClaw.Node -ErrorAction SilentlyContinue | Where-Object {
+        $_.SessionId -eq [Diagnostics.Process]::GetCurrentProcess().SessionId -and $_.Path -and $_.Path -ne $exe
+    }).Count) { throw 'Another companion is running. Use -BuildOnly to leave it running, or exit its tray before testing this checkout.' }
+
+    # Use an exact remote branch, never an ambiguous tag or a stale tracking ref.
+    Invoke-Git fetch --no-tags origin "${localRef}:${remoteRef}"
+    $target = Invoke-Git rev-parse --verify "${remoteRef}^{commit}"
+    & git -C $repo show-ref --verify --quiet $localRef
+    $refStatus = $LASTEXITCODE
+    if ($refStatus -eq 0) {
+        & git -C $repo merge-base --is-ancestor $localRef $target
+        if ($LASTEXITCODE -ne 0) { throw "Local '$Branch' is ahead of or diverged from origin/$Branch. No app was stopped." }
+        if ($current -cne $Branch) { Invoke-Git switch --no-guess -- $Branch }
+    } elseif ($refStatus -eq 1) {
+        Invoke-Git switch --track -c $Branch $remoteRef
+    } else { throw "Cannot inspect local branch '$Branch'." }
+    if ((Invoke-Git symbolic-ref HEAD) -cne $localRef) { throw 'Refusing to merge into an unexpected branch.' }
+    Invoke-Git merge --ff-only $target
+    if ((Invoke-Git rev-parse HEAD) -cne $target) { throw 'Selected branch does not match the fetched commit.' }
+    Ensure-BrowserRuntime
+
+    if (!$BuildOnly -and @($running | Where-Object { !$_.Path }).Count) {
         $restartOnFailure = Stop-ElevatedRelease
-    } else {
+        if (@(Get-InstalledProcess $exe -IncludeUnknown | Where-Object { !$_.Path }).Count) {
+            throw 'An unidentified companion is still running; refusing to launch a second tray.'
+        }
+    } elseif (!$BuildOnly) {
         foreach ($p in $running) {
             try { Stop-InstalledProcess $p; $restartOnFailure = $true }
             catch {
@@ -118,16 +153,18 @@ try {
         }
     }
     # Only the bundled worker can hold this build's runtime files open. Leave Chrome and system Node alone.
-    foreach ($p in (Get-InstalledProcess (Join-Path $release 'runtimes\browser\node\node.exe'))) { Stop-InstalledProcess $p }
-    Invoke-Git merge --ff-only $target
-    Ensure-BrowserRuntime
+    foreach ($p in (Get-InstalledProcess (Join-Path $release 'runtimes\browser\node\node.exe'))) {
+        if ($BuildOnly) { throw 'The checkout browser worker is still running. No process was stopped.' }
+        Stop-InstalledProcess $p
+    }
     $restartOnFailure = $false  # from here, a failed build might have partially overwritten Release
     & dotnet build (Join-Path $project 'OpenClaw.Node.csproj') -c Release -f net8.0-windows -p:Platform=x64
     if ($LASTEXITCODE -ne 0) { throw "Release build failed ($LASTEXITCODE). Companion not started; fix the error and rerun." }
     foreach ($name in @('OpenClaw.Node.exe','OpenClaw.Node.dll','OpenClaw.Node.runtimeconfig.json','runtimes\browser\node\node.exe','runtimes\browser\chrome-devtools-mcp\build\src\bin\chrome-devtools-mcp.js')) {
         if (!(Test-Path -LiteralPath (Join-Path $release $name) -PathType Leaf)) { throw "Incomplete Release build: missing $name." }
     }
-    Start-Tray
+    if ($BuildOnly) { Write-Host "Built origin/$Branch at $target. No tray was started." }
+    else { Start-Tray }
 } catch {
     if ($restartOnFailure -and !(Get-InstalledProcess $exe)) { Start-Tray }
     throw
