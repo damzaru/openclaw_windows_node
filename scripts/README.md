@@ -1,6 +1,6 @@
 # Companion maintenance
 
-For a release installation, use the installed tray's **Check for updates...** command. The script below is only for a companion running from a Git checkout.
+For an installed node, use the tray's **Check for updates...** command. To move an existing node or add another Windows PC, follow the [release installer instructions](../README.md#install-or-update-on-windows-x64). Do not run the checkout updater on an installed node: it starts a separate source copy.
 
 ## Update a Windows source checkout
 

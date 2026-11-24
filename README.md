@@ -10,9 +10,17 @@ The Gateway source tree is a reference only. This repository does not modify it.
 
 ## Install or update on Windows x64
 
-Download **OpenClawCompanion-Setup.exe** from this repository's [latest GitHub release](../../releases/latest). Run it as the Windows user who will use the companion, then open **OpenClaw Companion** from Start if the tray has not already opened. The installer includes .NET and the pinned browser helper; installing from a release does not require Git, an SDK, SSH, Python, or a repository token.
+Download **OpenClawCompanion-Setup.exe** and its matching Sigstore bundle from this repository's [latest GitHub release](../../releases/latest). Verify Setup using the command below, then run it as the Windows user who will use the companion. Open **OpenClaw Companion** from Start if the tray has not already opened. The installer includes .NET and the pinned browser helper; installing from a release does not require Git, an SDK, SSH, Python, or a repository token.
 
-When moving from a source build, exit its tray first and keep the old directory until you have verified the new copy. Use the same Windows account to retain settings and device credentials. If **Start with Windows** was enabled, save Settings from the installed copy to repoint that startup entry. Replace any separately configured old shortcut or scheduled launch; do not run both copies.
+Use the release installer on each Windows PC, then update from that PC's tray. There is no remote deployment script. A Git checkout is only needed to build or develop the companion.
+
+To migrate an existing node without pairing it again:
+
+1. Exit the old tray and run Setup under the **same Windows account**, keeping any custom state-directory configuration. Leave the existing settings, identity, browser profile, and checkout in place.
+2. Open **OpenClaw Companion** from Start. Confirm the node reconnects and **Copy Diagnostics → windowsPackage** shows a package number rather than `source`.
+3. Repoint existing shortcuts to the installed launcher. With the default installation, that is `%LOCALAPPDATA%\OpenClawCompanion\OpenClaw Companion.exe`. If **Start with Windows** was enabled, save Settings from the installed tray. Disable any old scheduled launch for the checkout so only one copy starts.
+
+If the installed copy does not reconnect, exit it before restarting the old copy. A change of install location does not require deleting credentials or generating a new identity.
 
 Choose **Check for updates...** from the installed tray. After the download is verified, choose **Yes** to restart and briefly disconnect, or **No** to keep working. Background checks can stage updates but do not restart the app. **Copy Diagnostics → windowsPackage** identifies the installed package without adding another version to the tray. A source build reports `source` and uses the [checkout updater](scripts/README.md).
 
@@ -262,7 +270,7 @@ Build without fetching or restarting (with the pinned runtime already present):
 dotnet build .\src\OpenClaw.Node\OpenClaw.Node.csproj -c Release -p:Platform=x64 -f net8.0-windows
 ```
 
-The installed Release output is:
+The **source checkout's** Release output is separate from the per-user installation:
 
 ```text
 src\OpenClaw.Node\bin\x64\Release\net8.0-windows\
