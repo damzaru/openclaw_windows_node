@@ -14,15 +14,19 @@ Download **OpenClawCompanion-Setup.exe** and its matching Sigstore bundle from t
 
 Use the release installer on each Windows PC, then update from that PC's tray. There is no remote deployment script. A Git checkout is only needed to build or develop the companion.
 
-To migrate an existing node without pairing it again:
+The two default folders under `%LOCALAPPDATA%` have different lifetimes: `OpenClawCompanion` is managed by the installer, and `OpenClaw Companion Data` holds your settings, pairing credentials, approvals, and browser profile. Keep them separate so reinstalling, repairing, or uninstalling the app does not erase your data.
 
-1. Exit the old tray and run Setup under the **same Windows account**, keeping any custom state-directory configuration. Leave the existing settings, identity, browser profile, and checkout in place.
+If your previous build used `%LOCALAPPDATA%\OpenClaw Companion` for data, exit the tray and close the companion-managed browser before renaming that folder to `OpenClaw Companion Data` under the same Windows account. Then run the verified installer for the new build. The new build does not read the old default path. Do not merge two existing data folders; preserve them separately if both already exist. No rename is needed if you use a custom `OPENCLAW_WINDOWS_HOME`.
+
+To switch from a development checkout to the installer without pairing again:
+
+1. Exit the old tray, rename its data directory if needed as described above, and run Setup under the **same Windows account**. Keep any custom state-directory configuration and leave the checkout in place.
 2. Open **OpenClaw Companion** from Start. Confirm the node reconnects and **Copy Diagnostics → windowsPackage** shows a package number rather than `source`.
 3. Repoint existing shortcuts to the installed launcher. With the default installation, that is `%LOCALAPPDATA%\OpenClawCompanion\OpenClaw Companion.exe`. If **Start with Windows** was enabled, save Settings from the installed tray. Disable any old scheduled launch for the checkout so only one copy starts.
 
-If the installed copy does not reconnect, exit it before restarting the old copy. A change of install location does not require deleting credentials or generating a new identity.
+If the installed copy does not reconnect, exit it before restarting the old copy. If the old build expects the former directory name, point its `OPENCLAW_WINDOWS_HOME` at the renamed data folder. A change of install location does not require deleting credentials or generating a new identity.
 
-Choose **Check for updates...** from the installed tray. After the download is verified, choose **Yes** to restart and briefly disconnect, or **No** to keep working. Background checks can stage updates but do not restart the app. **Copy Diagnostics → windowsPackage** identifies the installed package without adding another version to the tray. A [development checkout](scripts/README.md) reports `source`.
+Choose **Check for updates...** or **Restart to update...** from the installed tray. Both check for the latest published full package before offering to restart, even if an older update was downloaded in the background. You can skip intervening versions. After the download is verified, choose **Yes** to restart and briefly disconnect, or **No** to keep working. Background checks can stage updates but do not restart the app. **Copy Diagnostics → windowsPackage** identifies the installed package without adding another version to the tray. A [development checkout](scripts/README.md) reports `source`.
 
 Each release includes Sigstore signatures for Setup and the update feed; these are not Windows Authenticode signatures. For initial installation, obtain Setup only from this repository's release page and verify its provenance before running it. With Cosign installed, download the matching `OpenClawCompanion-Setup.exe.sigstore.json` and run this in the download folder (substitute the public repository URL, without a trailing slash):
 
@@ -108,14 +112,14 @@ For a remote `wss://` Gateway, Settings accepts an optional SHA-256 certificate 
 Companion-owned data is stored under:
 
 ```text
-%LOCALAPPDATA%\OpenClaw Companion\
+%LOCALAPPDATA%\OpenClaw Companion Data\
 ```
 
 Secrets and identities use Windows DPAPI with `CurrentUser` scope. The native execution policy is a non-secret JSON file in the same directory and is written atomically.
 
 ## Logs and connection diagnosis
 
-Every launch, including a double-clicked tray build, writes timestamped startup, connection, and error records under `%LOCALAPPDATA%\OpenClaw Companion\logs\companion-*.log`. The tray's **Open Logs** action opens that folder, and copied diagnostics include its path. `OPENCLAW_WINDOWS_HOME` redirects this folder along with other companion-owned data during tests. The old repository `logs/node-watchdog*` files remain launcher logs, not the canonical application logs.
+Every launch, including a double-clicked tray build, writes timestamped startup, connection, and error records under `%LOCALAPPDATA%\OpenClaw Companion Data\logs\companion-*.log`. The tray's **Open Logs** action opens that folder, and copied diagnostics include its path. `OPENCLAW_WINDOWS_HOME` redirects this folder along with other companion-owned data during tests. The old repository `logs/node-watchdog*` files remain launcher logs, not the canonical application logs.
 
 Logs rotate at 4 MiB and retain the ten newest files (active files are not forcibly deleted). Credential fields, registered credentials, URL user-info/query strings, and capability tokens are redacted; browser response-body previews are not logged. Oversized lines are omitted. Logging failures do not stop the application.
 
@@ -194,7 +198,7 @@ The browser proxy supports AI snapshots and ref-based click, hover, type, key pr
 
 Browser lifecycle is explicit: status/profile/tab listing and requests targeting an existing tab never launch Chrome or initialize MCP just to probe availability. Only explicit open, or navigation without an existing target, can start a browser. A managed launch marks its own startup page and waits for it to become ready; the first open reuses that exact page once, instead of leaving an extra blank tab. Existing user tabs, including blank tabs and startup pages the user has navigated, are not reused. Closing an already-missing tab succeeds idempotently. For close requests only, loopback connection refusal also counts as already closed; timeouts and other HTTP/transport failures remain errors and never trigger startup. New tabs include Gateway-compatible durable ownership; owned cleanup verifies the profile/browser instance and reports `closed`, `missing`, `ownership-mismatch` or `unavailable`, without starting a replacement browser. MCP sessions are retired when the browser-instance identity changes.
 
-The browser profile lives in `%LOCALAPPDATA%\OpenClaw Companion\browser\managed-profile` (or under `OPENCLAW_WINDOWS_HOME` for an explicitly isolated installation). Startup atomically relocates a recognized legacy profile from the executable's `runtimes/browser/managed-profile` directory while the browser is closed. It never merges or overwrites an existing nonempty destination. `Local State`, cookies/login databases, passwords, extensions/settings, history and site storage are preserved. An explicitly chosen backup can be migrated with `--maintain-browser-profile --legacy-browser-profile <absolute-path>` while all companion browser processes are closed.
+The browser profile lives in `%LOCALAPPDATA%\OpenClaw Companion Data\browser\managed-profile` (or under `OPENCLAW_WINDOWS_HOME` for an explicitly isolated installation). Startup atomically relocates a recognized legacy profile from the executable's `runtimes/browser/managed-profile` directory while the browser is closed. It never merges or overwrites an existing nonempty destination. `Local State`, cookies/login databases, passwords, extensions/settings, history and site storage are preserved. An explicitly chosen backup can be migrated with `--maintain-browser-profile --legacy-browser-profile <absolute-path>` while all companion browser processes are closed.
 
 Settings expose disk/code cache targets (defaults **128/64 MiB**, range 16–2048). Managed Chrome receives the disk-cache-size target; on startup and every minute while the browser is closed, oversized disk/code cache containers and GPU/shader cache containers (32 MiB each) are cleared safely. These are cache targets, not a cap on persistent site data or all Chrome components. **Clear Browser Cache...** in the tray asks for confirmation and clears only allowlisted disk/code/GPU caches; it refuses to modify an active browser profile. It does not clear cookies, logins, extensions, history, service-worker storage or other site storage. Cache maintenance refuses symlinks/junctions and unknown process ownership.
 
@@ -245,7 +249,7 @@ It uses `PipeOptions.CurrentUserOnly`, a random DPAPI-protected 256-bit credenti
 
 These methods are not part of the Gateway command manifest.
 
-Same-user compatibility clients read `%LOCALAPPDATA%\OpenClaw Companion\ipc-credential.dat`, decrypt it with Windows DPAPI `CurrentUser` scope and the `OpenClaw.Windows.Companion.v2` optional entropy, and send the resulting credential as the top-level `authToken` on every request. The path follows `OPENCLAW_WINDOWS_HOME` when that test/development override is set.
+Same-user compatibility clients read `%LOCALAPPDATA%\OpenClaw Companion Data\ipc-credential.dat`, decrypt it with Windows DPAPI `CurrentUser` scope and the `OpenClaw.Windows.Companion.v2` optional entropy, and send the resulting credential as the top-level `authToken` on every request. The path follows `OPENCLAW_WINDOWS_HOME` when that test/development override is set.
 
 ## Build and test
 

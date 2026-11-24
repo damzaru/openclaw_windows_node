@@ -21,7 +21,7 @@ namespace OpenClaw.Node.Services
             var overrideDirectory = Environment.GetEnvironmentVariable("OPENCLAW_WINDOWS_HOME")?.Trim();
             _baseDirectory = baseDirectory ?? (!string.IsNullOrWhiteSpace(overrideDirectory)
                 ? overrideDirectory
-                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenClaw Companion"));
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenClaw Companion Data"));
         }
 
         public string BaseDirectory => _baseDirectory;

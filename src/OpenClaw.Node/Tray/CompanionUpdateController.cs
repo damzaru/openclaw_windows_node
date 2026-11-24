@@ -1,6 +1,7 @@
-#if WINDOWS
 using OpenClaw.Node.Services;
+#if WINDOWS
 using System.Windows.Forms;
+#endif
 using Velopack;
 
 namespace OpenClaw.Node.Tray;
@@ -11,8 +12,8 @@ internal sealed class CompanionUpdateController
     private readonly CancellationToken _lifetime;
     private readonly Action _exit;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private volatile UpdateInfo? _ready;
-    private CompanionUpdateController(UpdateManager manager, CancellationToken lifetime, Action exit)
+    private volatile bool _ready;
+    internal CompanionUpdateController(UpdateManager manager, CancellationToken lifetime, Action exit)
         => (_manager, _lifetime, _exit) = (manager, lifetime, exit);
 
     internal static CompanionUpdateController? ForInstalledApp(CancellationToken lifetime, Action exit)
@@ -22,15 +23,17 @@ internal sealed class CompanionUpdateController
         Console.WriteLine($"[UPDATE] Installed Windows package {manager.CurrentVersion}");
         return new(manager, lifetime, exit);
     }
-    internal string MenuText => _ready == null ? "Check for updates..." : "Restart to update...";
+    internal string MenuText => _ready ? "Restart to update..." : "Check for updates...";
 
-    private async Task PrepareAsync()
+    internal async Task<UpdateInfo?> PrepareAsync()
     {
         var update = await _manager.CheckForUpdatesAsync();
-        if (update == null) return;
+        _ready = false;
+        if (update == null) return null;
         await _manager.DownloadUpdatesAsync(update, cancelToken: _lifetime);
-        _ready = update;
+        _ready = true;
         Console.WriteLine($"[UPDATE] Verified package {update.TargetFullRelease.Version} is ready; waiting for user restart.");
+        return update;
     }
 
     internal async Task PollAsync()
@@ -52,30 +55,38 @@ internal sealed class CompanionUpdateController
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
     }
 
-    internal async void CheckFromTray()
+#if WINDOWS
+    internal async void CheckFromTray() => await CheckFromTrayAsync(
+        release => MessageBox.Show(
+            $"Update {release.Version} is ready. Restart now? This will briefly disconnect the node.",
+            "OpenClaw Companion", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+            MessageBoxDefaultButton.Button2) == DialogResult.Yes,
+        message => MessageBox.Show(message, "OpenClaw Companion"));
+#endif
+
+    internal async Task CheckFromTrayAsync(Func<VelopackAsset, bool> confirmRestart, Action<string> showMessage)
     {
-        // The tray owns this callback. Remain on its UI thread for dialogs.
+        // Stay on the calling UI thread for dialogs.
         if (!await _gate.WaitAsync(0))
         {
-            MessageBox.Show("An update check is already in progress.", "OpenClaw Companion");
+            showMessage("An update check is already in progress.");
             return;
         }
         try
         {
-            if (_ready == null) await PrepareAsync();
+            // A newer full package may have been published since the background download.
+            var update = await PrepareAsync();
             if (_lifetime.IsCancellationRequested) return;
-            if (_ready == null) { MessageBox.Show("You have the latest published build.", "OpenClaw Companion"); return; }
-            if (MessageBox.Show("The update is ready. Restart now? This will briefly disconnect the node.", "OpenClaw Companion",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-            _manager.WaitExitThenApplyUpdates(_ready.TargetFullRelease, silent: true, restart: true, restartArgs: new[] { "--tray" });
+            if (update == null) { showMessage("You have the latest published build."); return; }
+            if (!confirmRestart(update.TargetFullRelease)) return;
+            _manager.WaitExitThenApplyUpdates(update.TargetFullRelease, silent: true, restart: true, restartArgs: new[] { "--tray" });
             _exit();
         }
         catch (Exception e)
         {
             Console.Error.WriteLine("[UPDATE] " + e.Message);
-            if (!_lifetime.IsCancellationRequested) MessageBox.Show("Update not applied: " + e.Message, "OpenClaw Companion");
+            if (!_lifetime.IsCancellationRequested) showMessage("Update not applied: " + e.Message);
         }
         finally { _gate.Release(); }
     }
 }
-#endif

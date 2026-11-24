@@ -8,7 +8,7 @@ Current reference: Gateway **2026.11.8**, master `92d4728c1f9be71cd96918619d3777
 ## 2026-11-17: Profile/cache and version follow-up
 
 - App/product/Gateway-client version is plain **2026.11.5**, with a single `Version: 2026.11.5` tray row. Reference source provenance and internal build details are diagnostics-only. The reference checkout still declares 2026.11.4; no newer commit is claimed or substituted.
-- Browser profiles now live under `%LOCALAPPDATA%\OpenClaw Companion\browser\managed-profile`, outside executable/build payloads. Migration is offline, atomic on the same volume and refuses nonempty destination conflicts or unrecognized source directories.
+- Browser profiles live under `%LOCALAPPDATA%\OpenClaw Companion Data\browser\managed-profile`, outside executable/build payloads. Relocation from a legacy checkout is offline, atomic on the same volume and refuses nonempty destination conflicts or unrecognized source directories.
 - Migration verification checked that persistent profile files and extensions survived relocation and cache maintenance.
 - Configurable 128/64 MiB disk/code cache defaults, a Chrome disk-cache target and offline startup/minutely maintenance prevent unchecked cache growth between browser sessions. GPU/shader containers have a 32 MiB offline limit. Clear Browser Cache is a confirmation-protected tray action restricted to known cache directories. Active/unknown browser ownership and linked filesystem entries fail closed; persistent storage is not part of cache deletion.
 - Native settings-layout/permission tests: **10 passed**, including scrolling/action visibility at multiple sizes/scales. Release rebuild remains in the original shortcut target folder with zero warnings/errors.

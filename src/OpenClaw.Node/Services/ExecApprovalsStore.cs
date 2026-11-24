@@ -332,13 +332,6 @@ namespace OpenClaw.Node.Services
             dangerousAllowRulesAllowed = allowUnrestrictedExecutionPolicy,
         };
 
-        private static string ResolvePath()
-        {
-            var overrideDirectory = Environment.GetEnvironmentVariable("OPENCLAW_WINDOWS_HOME")?.Trim();
-            var directory = !string.IsNullOrWhiteSpace(overrideDirectory)
-                ? overrideDirectory!
-                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenClaw Companion");
-            return Path.Combine(directory, "exec-approvals-native.json");
-        }
+        private static string ResolvePath() => Path.Combine(new SecureStore().BaseDirectory, "exec-approvals-native.json");
     }
 }
