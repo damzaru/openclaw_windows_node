@@ -9,6 +9,8 @@ namespace OpenClaw.Node
         public static readonly string GatewaySourceCommit = Metadata("GatewaySourceCommit");
         public static readonly string GatewaySyncDate = Metadata("GatewaySyncDate");
         public static readonly string CompanionRevision = Metadata("CompanionRevision");
+        public static readonly string WindowsPackageBuild = Metadata("WindowsPackageBuild");
+        public static readonly string ReleaseRepository = Metadata("ReleaseRepository");
         public static readonly string BuildId = $"{GatewaySourceCommit[..12]}.{CompanionRevision}";
 
         private static string Metadata(string key) => System.Reflection.CustomAttributeExtensions.GetCustomAttributes<System.Reflection.AssemblyMetadataAttribute>(Assembly)

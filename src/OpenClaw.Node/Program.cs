@@ -13,13 +13,19 @@ namespace OpenClaw.Node
 {
     class Program
     {
-        static async Task Main(string[] args)
+        static void Main(string[] args)
         {
 #if WINDOWS
+            Velopack.VelopackApp.Build().SetAutoApplyOnStartup(false).Run();
             // Screen capture and SendInput must share physical-pixel coordinates
             // across displays with different scale factors, before any HWND exists.
             System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
 #endif
+            MainAsync(args).GetAwaiter().GetResult();
+        }
+
+        private static async Task MainAsync(string[] args)
+        {
             if (HasArg(args, "--version"))
             {
                 Console.WriteLine($"OpenClaw Windows Companion {BuildInfo.BuildVersion}");
@@ -178,8 +184,20 @@ namespace OpenClaw.Node
 
             if (trayEnabled)
             {
+                Action? checkForUpdates = null;
+                Func<string>? updateLabel = null;
+#if WINDOWS
+                var updates = CompanionUpdateController.ForInstalledApp(cts.Token, () => cts.Cancel());
+                if (updates != null)
+                {
+                    checkForUpdates = updates.CheckFromTray;
+                    updateLabel = () => updates.MenuText;
+                    _ = updates.PollAsync();
+                }
+#endif
                 trayHost = OperatingSystem.IsWindows()
                     ? new WindowsNotifyIconTrayHost(
+                        onCheckForUpdates: checkForUpdates, updateLabel: updateLabel,
                         log: msg => Console.WriteLine(msg),
                         onOpenLogs: () => OpenLogsFolder(),
                         onClearBrowserCache: BrowserCacheDialog.Show,
@@ -482,6 +500,7 @@ namespace OpenClaw.Node
                 $"uptimeSeconds: {uptime}",
                 $"pid: {Environment.ProcessId}",
                 $"buildVersion: {BuildInfo.BuildVersion}",
+                $"windowsPackage: {(string.IsNullOrEmpty(BuildInfo.WindowsPackageBuild) ? "source" : BuildInfo.WindowsPackageBuild)}",
                 $"gatewaySourceVersion: {BuildInfo.GatewaySourceVersion}",
                 $"gatewaySourceCommit: {BuildInfo.GatewaySourceCommit}",
                 $"gatewaySyncDate: {BuildInfo.GatewaySyncDate}",

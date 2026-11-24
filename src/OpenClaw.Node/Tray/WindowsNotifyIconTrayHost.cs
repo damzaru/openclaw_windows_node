@@ -16,6 +16,8 @@ namespace OpenClaw.Node.Tray
         private readonly Action? _onExit;
         private readonly Action? _onCopyDiagnostics;
         private readonly Action? _onClearBrowserCache;
+        private readonly Action? _onCheckForUpdates;
+        private readonly Func<string>? _updateLabel;
 
         private readonly TaskCompletionSource<bool> _startedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _stoppedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -31,7 +33,7 @@ namespace OpenClaw.Node.Tray
         private object? _onboardingItem;
         private object? _buildItem;
 
-        public WindowsNotifyIconTrayHost(Action<string>? log = null, Action? onOpenLogs = null, Action? onOpenSettings = null, Action? onRestart = null, Action? onExit = null, Action? onCopyDiagnostics = null, Action? onClearBrowserCache = null)
+        public WindowsNotifyIconTrayHost(Action<string>? log = null, Action? onOpenLogs = null, Action? onOpenSettings = null, Action? onRestart = null, Action? onExit = null, Action? onCopyDiagnostics = null, Action? onClearBrowserCache = null, Action? onCheckForUpdates = null, Func<string>? updateLabel = null)
         {
             _log = log;
             _onOpenLogs = onOpenLogs;
@@ -40,6 +42,8 @@ namespace OpenClaw.Node.Tray
             _onExit = onExit;
             _onCopyDiagnostics = onCopyDiagnostics;
             _onClearBrowserCache = onClearBrowserCache;
+            _onCheckForUpdates = onCheckForUpdates;
+            _updateLabel = updateLabel;
         }
 
         public async Task StartAsync(CancellationToken cancellationToken)
@@ -256,6 +260,14 @@ namespace OpenClaw.Node.Tray
                 AddMenuItem(menu, settingsItem);
                 AddMenuItem(menu, clearCacheItem);
                 AddMenuItem(menu, copyDiagItem);
+                if (_onCheckForUpdates != null)
+                {
+                    var update = Activator.CreateInstance(menuItemType, _updateLabel!())!;
+                    AddClickHandler(update, _onCheckForUpdates);
+                    AddMenuItem(menu, update);
+                    menuType.GetEvent("Opened")!.AddEventHandler(menu,
+                        (EventHandler)((_, _) => SetProperty(update, "Text", _updateLabel!())));
+                }
                 AddMenuItem(menu, restartItem);
                 if (separatorType != null && Activator.CreateInstance(separatorType) is object separator2) AddMenuItem(menu, separator2);
                 AddMenuItem(menu, exitItem);

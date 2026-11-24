@@ -1,0 +1,62 @@
+name: Windows release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      id-token: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PACKAGE_VERSION: 1.0.${{ github.run_number }}
+      DOTNET_NOLOGO: true
+      VPK_NO_TELEMETRY: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: 8.0.x
+      - name: Build clean x64 installer
+        run: |
+          dotnet tool install vpk --version 1.2.161 --tool-path "$env:RUNNER_TEMP/vpk"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./.github/release/pack.ps1 -Version $env:PACKAGE_VERSION -Repository $env:GITHUB_REPOSITORY -Stage "$env:RUNNER_TEMP/companion" -Vpk "$env:RUNNER_TEMP/vpk/vpk.exe"
+      - uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad
+      - name: Sign installer and update feed
+        run: |
+          Set-Location "$env:RUNNER_TEMP/companion/release"
+          foreach ($file in 'OpenClawCompanion-Setup.exe','releases.win.json') {
+            cosign sign-blob --yes --bundle "$file.sigstore.json" $file
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            cosign verify-blob --bundle "$file.sigstore.json" --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity "https://github.com/$env:GITHUB_WORKFLOW_REF" $file
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Verify signed package with the companion's own update code
+        run: |
+          $env:OPENCLAW_RELEASE_VERIFY_DIR = "$env:RUNNER_TEMP/companion/release"
+          dotnet test src/OpenClaw.Node.Tests -p:Platform=x64 "-p:ReleaseRepository=$env:GITHUB_REPOSITORY" --filter 'FullyQualifiedName~SignedReleaseTests'
+      - name: Publish only verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Set-Location "$env:RUNNER_TEMP/companion/release"
+          $tag = "windows-$env:PACKAGE_VERSION"
+          $files = @('OpenClawCompanion-Setup.exe','OpenClawCompanion-Setup.exe.sigstore.json','releases.win.json','releases.win.json.sigstore.json',"OpenClawCompanion-$env:PACKAGE_VERSION-full.nupkg")
+          gh release create $tag @files --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --draft --title "Windows x64 · $env:PACKAGE_VERSION" --notes 'Per-user Windows installer. Download OpenClawCompanion-Setup.exe. Existing installed copies can update from the tray. This release provides Sigstore bundles; Setup is not Authenticode-signed.'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest

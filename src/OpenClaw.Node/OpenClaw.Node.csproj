@@ -19,14 +19,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Velopack" Version="1.2.161" />
+    <PackageReference Include="Sigstore.Net" Version="1.0.3" />
     <PackageReference Include="ModelContextProtocol" Version="1.1.0" />
     <PackageReference Include="ScreenRecorderLib" Version="6.6.0" />
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" Condition="'$(TargetFramework)' == 'net8.0-windows'" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
+    <AssemblyMetadata Include="ReleaseRepository" Value="$(ReleaseRepository)" />
+    <AssemblyMetadata Include="WindowsPackageBuild" Value="$(WindowsPackageBuild)" />
     <EmbeddedResource Include="Tray/Assets/openclaw-claw.ico" LogicalName="OpenClaw.Node.Tray.Assets.openclaw-claw.ico" />
   </ItemGroup>
 
