@@ -1,0 +1,2 @@
+# Bash must also run from a Windows checkout with core.autocrlf=true.
+/scripts/*.sh text eol=lf

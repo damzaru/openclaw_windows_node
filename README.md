@@ -2,7 +2,7 @@
 
 A Windows tray companion for the OpenClaw Gateway. App version `2026.11.8` matches the installed Gateway and negotiates node protocol versions 3 through 4. The read-only reference checkout inspected on **2026-11-24** is master `92d4728c1f9be71cd96918619d3777368bbda257` (package `2026.11.8`).
 
-The app, Gateway connection, device information, tray and Windows product metadata use the same plain Gateway date-version, with one tray line: `Version: 2026.11.8`. There is no companion suffix or extra baseline/version row. `src/OpenClaw.Node/Version.props` is the source of version metadata. Exact source package version, commit, sync date, internal revision and connected server version remain in copied diagnostics and logs only. `scripts/bump-build.ps1` synchronizes read-only source provenance and increments the internal file/build revision; pass `-GatewayVersion` with the verified running Gateway version to change the public version. It does not silently downgrade the public version to a stale checkout package version. Use `-Check` to check provenance or `-WhatIf` to preview changes.
+The app, connection, device information, tray and Windows product metadata use one Gateway version: `Version: 2026.11.8`. On a Gateway sync, update the version, source package version, exact commit and sync date in `src/OpenClaw.Node/Version.props`. A normal rebuild uses those committed values unchanged; build details stay in diagnostics and logs.
 
 See [PARITY.md](PARITY.md) for this sync's compatibility findings and remaining optional gaps.
 
@@ -97,7 +97,7 @@ Logs rotate at 4 MiB and retain the ten newest files (active files are not forci
 For a bounded, non-interactive startup and connection check using the normal saved settings:
 
 ```powershell
-.\src\OpenClaw.Node\bin\x64\Debug\net8.0-windows\OpenClaw.Node.exe --diagnose-connection
+.\src\OpenClaw.Node\bin\x64\Release\net8.0-windows\OpenClaw.Node.exe --diagnose-connection
 ```
 
 The check exits after node connection, a transport/authentication failure, or 25 seconds. It does not start local IPC/discovery, show dialogs, or remain running. Exit codes: 0 means node connected; 1 means startup/runtime failure; 2 means missing credentials or Gateway rejection; 3 means transport failure/timeout. A node success does not imply that the optional operator sidecar is paired; check its separately labeled messages for Canvas/Talk authorization. A temporary `--gateway-url` override does not change saved settings.
@@ -173,7 +173,7 @@ The browser profile lives in `%LOCALAPPDATA%\OpenClaw Companion\browser\managed-
 
 Settings expose disk/code cache targets (defaults **128/64 MiB**, range 16–2048). Managed Chrome receives the disk-cache-size target; on startup and every minute while the browser is closed, oversized disk/code cache containers and GPU/shader cache containers (32 MiB each) are cleared safely. These are cache targets, not a cap on persistent site data or all Chrome components. **Clear Browser Cache...** in the tray asks for confirmation and clears only allowlisted disk/code/GPU caches; it refuses to modify an active browser profile. It does not clear cookies, logins, extensions, history, service-worker storage or other site storage. Cache maintenance refuses symlinks/junctions and unknown process ownership.
 
-The Windows build replaces only vendored `chrome-devtools-mcp`/`node` output directories so npm's old file timestamps cannot retain stale runtime files. User browser data is no longer kept inside build output. Refresh the source bundle using `scripts/vendor-browser-runtime.ps1`; the Bash entry point delegates to it on Windows/WSL.
+The Windows build replaces only vendored `chrome-devtools-mcp`/`node` output directories. User browser data is kept outside build output. See the [browser runtime notes](src/OpenClaw.Node/browser-runtime/README.md) for the pinned inputs.
 
 Computer control is disabled by default. Its v2 descriptor advertises `screenshot` plus the 13 implemented pointer, scroll, text, key, and held-key actions, screen targets, foreground delivery, and image observations. The Gateway derives `wait` from screenshot support. Primary/secondary input respects Windows' swapped-button setting, including drags; OS handedness settings are not changed. The Windows executable initializes Per-Monitor V2 DPI awareness before creating windows. Pointer coordinates bind to `displayFrameId`, `refWidth`, and the requesting execution from a recent `screen.snapshot`; stale display layouts are rejected, including multi-monitor origin changes. Held input is released on cancellation, disconnect, or Gateway `__close_execution` cleanup; cleanup invalidates only that execution's frames. Split drags auto-release after 30 seconds without activity. Window/accessibility/background/browser-specific v2 actions and recording are not advertised. Native input acceptance is reported as `effect: "unverifiable"`, not as proof that an application changed.
 
@@ -224,6 +224,8 @@ Same-user compatibility clients read `%LOCALAPPDATA%\OpenClaw Companion\ipc-cred
 
 ## Build and test
 
+To update the installed companion, run `.\scripts\update-companion.ps1` from PowerShell. It fast-forwards `main`, rebuilds in the existing Release folder and starts the tray app. See [Companion maintenance](scripts/README.md) for prerequisites, failure handling.
+
 Restore and run the full test suite:
 
 ```powershell
@@ -237,16 +239,16 @@ Run the Windows-only settings layout regressions (including compact windows and 
 dotnet test .\src\OpenClaw.Node.Tests\OpenClaw.Node.Tests.csproj -p:Platform=x64 -p:WindowsUiTests=true --filter FullyQualifiedName~CompanionSettingsDialogTests
 ```
 
-Build the Windows companion:
+Build without fetching or restarting (with the pinned runtime already present):
 
 ```powershell
-dotnet build .\src\OpenClaw.Node\OpenClaw.Node.csproj --no-restore -p:Platform=x64 -f net8.0-windows
+dotnet build .\src\OpenClaw.Node\OpenClaw.Node.csproj -c Release -p:Platform=x64 -f net8.0-windows
 ```
 
-The canonical debug output is:
+The installed Release output is:
 
 ```text
-src\OpenClaw.Node\bin\x64\Debug\net8.0-windows\
+src\OpenClaw.Node\bin\x64\Release\net8.0-windows\
 ```
 
 Run directly:
@@ -256,8 +258,6 @@ dotnet run --project .\src\OpenClaw.Node\OpenClaw.Node.csproj -p:Platform=x64 -f
 ```
 
 Windows starts in tray mode by default. Use `--no-tray` for a headless process or `--tray` to force tray mode.
-
-Repository scripts in `scripts/` remain the canonical workflow for build-label bumps, local reloads, preflight checks, and deployment.
 
 ## Architecture
 
@@ -280,4 +280,4 @@ Repository scripts in `scripts/` remain the canonical workflow for build-label b
 - Camera clips use `ffmpeg` DirectShow. Requests with `includeAudio: true` capture the first available DirectShow microphone and fail clearly when no microphone is available.
 - Talk transcription uses Windows `System.Speech`; recognition quality and language availability depend on installed Windows speech components.
 - Native Windows desktop input has an opt-in disposable-window smoke test (capture, primary click with swapped buttons, Ctrl+A, Unicode typing and replacement). Real-browser acceptance of the bundled DevTools actions remains separate. Desktop streaming has a real TCP/WebSocket handshake regression test, but this sync does not install or provision a VNC server.
-- ARM64 packaging, WSL provisioning, a full Command Center/chat UI, an updater, and local MCP/Claude runtimes are not included.
+- ARM64 packaging, WSL provisioning, a full Command Center/chat UI, in-app automatic updates, and local MCP/Claude runtimes are not included.

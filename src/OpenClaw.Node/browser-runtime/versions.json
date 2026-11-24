@@ -1,5 +1,6 @@
 ﻿{
     "nodeVersion":  "v24.14.0",
+    "nodeWinX64Sha256":  "63c259c81e5d472b5f11c8d506070130cb04a1ecf84b80377a34ed6ec9048088",
     "chromeDevtoolsMcpVersion":  "1.12.0",
     "npmIntegrity":  "sha512-lAGpH0zXT1ZdaPefP1KK/MvxwihOlu7VGQ7p4wbhD9OhN17vUC4KWk/ImUYR9DE4s+7r4r0ySV4xr2OkTa7ZMA==",
     "gatewayPatchSha256":  "1512760e206b35bf417387b18d4c1a5d0f68e2ffeef994cb733c9e02ba4eba92"

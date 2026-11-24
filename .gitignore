@@ -1,4 +1,5 @@
 **/bin/
+!src/OpenClaw.Node/browser-runtime/chrome-devtools-mcp/build/src/bin/
 **/obj/
 *.user
 *.suo

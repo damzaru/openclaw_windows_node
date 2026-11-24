@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <!-- Sync these fields from the read-only Gateway checkout with scripts/bump-build.ps1. -->
+    <!-- On a Gateway sync, record its package version, exact Git commit and sync date here. -->
     <GatewayVersion>2026.11.8</GatewayVersion>
     <GatewaySourceVersion>2026.11.8</GatewaySourceVersion>
     <GatewaySourceCommit>92d4728c1f9be71cd96918619d3777368bbda257</GatewaySourceCommit>
