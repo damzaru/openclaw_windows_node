@@ -55,6 +55,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           Set-Location "$env:RUNNER_TEMP/companion/release"
+          # Do not tag a superseded commit or promote an older CI rerun to latest.
+          # The newer main build owns publication. No PAT is needed in CI.
+          $main = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($main -cne $env:GITHUB_SHA) {
+            Write-Host 'Main advanced during the build; skipping publication.'
+            exit 0
+          }
+          $published = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($prior in $published) {
+            if ($prior -match '^windows-(1\.0\.[1-9][0-9]*)$' -and [version]$Matches[1] -ge [version]$env:PACKAGE_VERSION) {
+              Write-Host 'An equal or newer Windows package is already published; skipping publication.'
+              exit 0
+            }
+          }
           $tag = "windows-$env:PACKAGE_VERSION"
           $files = @('OpenClawCompanion-Setup.exe','OpenClawCompanion-Setup.exe.sigstore.json','releases.win.json','releases.win.json.sigstore.json',"OpenClawCompanion-$env:PACKAGE_VERSION-full.nupkg")
           gh release create $tag @files --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --draft --title "Windows x64 · $env:PACKAGE_VERSION" --notes 'Per-user Windows installer. Download OpenClawCompanion-Setup.exe. Existing installed copies can update from the tray. This release provides Sigstore bundles; Setup is not Authenticode-signed.'
