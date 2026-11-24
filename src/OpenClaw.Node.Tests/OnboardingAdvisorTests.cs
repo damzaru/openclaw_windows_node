@@ -1,5 +1,3 @@
-using System;
-using System.IO;
 using OpenClaw.Node.Tray;
 using Xunit;
 
@@ -10,8 +8,7 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public void Evaluate_ShouldFail_WhenTokenMissing()
         {
-            var configPath = CreateTempConfig();
-            var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "", configPath);
+            var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "");
             Assert.False(result.Ready);
             Assert.Contains("token", result.StatusText, StringComparison.OrdinalIgnoreCase);
         }
@@ -19,42 +16,32 @@ namespace OpenClaw.Node.Tests
         [Fact]
         public void Evaluate_ShouldFail_WhenGatewayUrlInvalid()
         {
-            var configPath = CreateTempConfig();
-            var result = OnboardingAdvisor.Evaluate("http://127.0.0.1:18789", "abc", configPath);
+            var result = OnboardingAdvisor.Evaluate("http://127.0.0.1:18789", "abc");
             Assert.False(result.Ready);
             Assert.Contains("Invalid gateway URL", result.StatusText);
         }
 
         [Fact]
-        public void Evaluate_ShouldPass_WhenLegacyConfigMissingButSecureSettingsResolved()
+        public void Evaluate_ShouldPass_WhenSecureSettingsResolvedWithoutLegacyConfig()
         {
-            var missingPath = Path.Combine(Path.GetTempPath(), $"openclaw-missing-{Guid.NewGuid():N}.json");
-            var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "abc", missingPath);
+            var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "abc");
             Assert.True(result.Ready);
         }
 
         [Fact]
-        public void Evaluate_ShouldPass_WhenLegacyConfigHasParseErrorButSecureSettingsResolved()
+        public void Evaluate_ShouldPass_WhenStoredDeviceTokenSupportsReconnect()
         {
-            var configPath = CreateTempConfig();
-            var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "abc", configPath, "Unexpected token at line 1");
+            var result = OnboardingAdvisor.Evaluate("wss://gateway.example", "", hasStoredDeviceToken: true);
             Assert.True(result.Ready);
         }
 
         [Fact]
         public void Evaluate_ShouldPass_WhenAllChecksGood()
         {
-            var configPath = CreateTempConfig();
-            var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "abc", configPath);
+            var result = OnboardingAdvisor.Evaluate("ws://127.0.0.1:18789", "abc");
             Assert.True(result.Ready);
             Assert.Equal("Onboarding: Ready", result.StatusText);
         }
 
-        private static string CreateTempConfig()
-        {
-            var path = Path.Combine(Path.GetTempPath(), $"openclaw-config-{Guid.NewGuid():N}.json");
-            File.WriteAllText(path, "{\"gateway\":{\"port\":18789,\"auth\":{\"token\":\"abc\"}}}");
-            return path;
-        }
     }
 }

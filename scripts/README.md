@@ -40,16 +40,17 @@ Then from WSL/bash:
 
 ## `bump-build.ps1`
 
-**Purpose:** Increment the runtime-visible build label in `src/OpenClaw.Node/BuildInfo.cs`.
+**Purpose:** Synchronize Gateway-compatible version metadata in `src/OpenClaw.Node/Version.props`.
 
 ### Why this exists
-The tray menu and several runtime surfaces use `BuildInfo.BuildVersion` (for example `b0028`), not just assembly/file version metadata.
+The tray menu, Gateway connection and other runtime surfaces read the same assembly version metadata derived from `Version.props`. The old `bNNNN` labels are retired.
 
 ### Behavior
-- reads `src/OpenClaw.Node/BuildInfo.cs`
-- increments `bNNNN` by one
-- writes the updated source file in place
-- prints the new build label
+- reads the sibling Gateway checkout's `package.json` version and exact Git HEAD without modifying it
+- updates `src/OpenClaw.Node/Version.props` with source package version, commit and sync date; preserves the public app version unless `-GatewayVersion <verified-running-version>` is supplied
+- increments the internal companion file/build revision when provenance and public version are unchanged; otherwise resets it to zero
+- keeps product version identical to the Gateway version, with separate assembly metadata for provenance
+- `-GatewaySourcePath` selects another reference checkout, `-Check` verifies the sync, and `-WhatIf` previews changes
 
 ### Example
 ```powershell
@@ -64,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bump-build.ps1 -Re
 
 ### Behavior
 Prints JSON with:
-- source build label from `BuildInfo.cs`
+- source version, Gateway commit and sync date from `Version.props`
 - canonical build output path
 - whether the canonical build exists
 - file/product version from the canonical build exe
@@ -161,12 +162,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-reload.ps1 -R
 
 ### Default pinned versions
 - Node: `v24.14.0`
-- `chrome-devtools-mcp`: `0.20.0`
+- `chrome-devtools-mcp`: `1.12.0`, with the Gateway's pinned snapshot-identity patch
 
 ### Example
 ```bash
 ./scripts/vendor-browser-runtime.sh
 ```
+
+On Windows, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\vendor-browser-runtime.ps1` directly. The Bash entry point delegates to this implementation. It verifies the npm integrity and Node archive checksum before replacing source payloads, copies the reference patch read-only, and records its hash. Runtime user profiles are not touched. Builds clear only vendored output directories and always copy assets, avoiding mixed versions caused by normalized npm timestamps.
 
 ---
 
@@ -175,5 +178,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-reload.ps1 -R
 - If the normal build output path is blocked or locked, **do not silently switch to a random output directory**.
 - If a different build path is needed, **say the exact path first and ask**.
 - If testing on a live node/machine, inspect the currently running build/capabilities before redeploying.
-- Bump the runtime-visible build label in `BuildInfo.cs` before relying on tray/build verification.
+- Synchronize `Version.props` with `bump-build.ps1` before relying on version/build verification.
 - Prefer explicit, traceable build identity over mystery binaries.

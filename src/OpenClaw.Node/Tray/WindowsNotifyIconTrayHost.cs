@@ -11,11 +11,11 @@ namespace OpenClaw.Node.Tray
     {
         private readonly Action<string>? _log;
         private readonly Action? _onOpenLogs;
-        private readonly Action? _onOpenConfig;
         private readonly Action? _onOpenSettings;
         private readonly Action? _onRestart;
         private readonly Action? _onExit;
         private readonly Action? _onCopyDiagnostics;
+        private readonly Action? _onClearBrowserCache;
 
         private readonly TaskCompletionSource<bool> _startedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _stoppedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -31,15 +31,15 @@ namespace OpenClaw.Node.Tray
         private object? _onboardingItem;
         private object? _buildItem;
 
-        public WindowsNotifyIconTrayHost(Action<string>? log = null, Action? onOpenLogs = null, Action? onOpenConfig = null, Action? onOpenSettings = null, Action? onRestart = null, Action? onExit = null, Action? onCopyDiagnostics = null)
+        public WindowsNotifyIconTrayHost(Action<string>? log = null, Action? onOpenLogs = null, Action? onOpenSettings = null, Action? onRestart = null, Action? onExit = null, Action? onCopyDiagnostics = null, Action? onClearBrowserCache = null)
         {
             _log = log;
             _onOpenLogs = onOpenLogs;
-            _onOpenConfig = onOpenConfig;
             _onOpenSettings = onOpenSettings;
             _onRestart = onRestart;
             _onExit = onExit;
             _onCopyDiagnostics = onCopyDiagnostics;
+            _onClearBrowserCache = onClearBrowserCache;
         }
 
         public async Task StartAsync(CancellationToken cancellationToken)
@@ -88,7 +88,7 @@ namespace OpenClaw.Node.Tray
                     }
                     if (_buildItem != null)
                     {
-                        SetProperty(_buildItem, "Text", $"Build: {snapshot.BuildVersion}");
+                        SetProperty(_buildItem, "Text", $"Version: {snapshot.BuildVersion}");
                     }
                 }
                 catch (Exception ex)
@@ -199,7 +199,7 @@ namespace OpenClaw.Node.Tray
                     ?? throw new InvalidOperationException("Unable to create Reconnect item");
                 _onboardingItem = Activator.CreateInstance(menuItemType, "Onboarding: Ready")
                     ?? throw new InvalidOperationException("Unable to create Onboarding item");
-                _buildItem = Activator.CreateInstance(menuItemType, "Build: unknown")
+                _buildItem = Activator.CreateInstance(menuItemType, $"Version: {BuildInfo.BuildVersion}")
                     ?? throw new InvalidOperationException("Unable to create Build item");
                 SetProperty(_stateItem, "Enabled", false);
                 SetProperty(_pairsItem, "Enabled", false);
@@ -209,10 +209,10 @@ namespace OpenClaw.Node.Tray
 
                 var openLogsItem = Activator.CreateInstance(menuItemType, "Open Logs")
                     ?? throw new InvalidOperationException("Unable to create Open Logs item");
-                var openConfigItem = Activator.CreateInstance(menuItemType, "Open Config File")
-                    ?? throw new InvalidOperationException("Unable to create Open Config item");
                 var settingsItem = Activator.CreateInstance(menuItemType, "Settings...")
                     ?? throw new InvalidOperationException("Unable to create Settings item");
+                var clearCacheItem = Activator.CreateInstance(menuItemType, "Clear Browser Cache...")!;
+                AddClickHandler(clearCacheItem, () => _onClearBrowserCache?.Invoke());
                 var copyDiagItem = Activator.CreateInstance(menuItemType, "Copy Diagnostics")
                     ?? throw new InvalidOperationException("Unable to create Copy Diagnostics item");
                 var restartItem = Activator.CreateInstance(menuItemType, "Restart Node")
@@ -224,11 +224,6 @@ namespace OpenClaw.Node.Tray
                 {
                     try { _onOpenLogs?.Invoke(); }
                     catch (Exception ex) { _log?.Invoke($"[TRAY] Open Logs action failed: {ex.Message}"); }
-                });
-                AddClickHandler(openConfigItem, () =>
-                {
-                    try { _onOpenConfig?.Invoke(); }
-                    catch (Exception ex) { _log?.Invoke($"[TRAY] Open Config action failed: {ex.Message}"); }
                 });
                 AddClickHandler(settingsItem, () =>
                 {
@@ -259,7 +254,7 @@ namespace OpenClaw.Node.Tray
                 if (separatorType != null && Activator.CreateInstance(separatorType) is object separator1) AddMenuItem(menu, separator1);
                 AddMenuItem(menu, openLogsItem);
                 AddMenuItem(menu, settingsItem);
-                AddMenuItem(menu, openConfigItem);
+                AddMenuItem(menu, clearCacheItem);
                 AddMenuItem(menu, copyDiagItem);
                 AddMenuItem(menu, restartItem);
                 if (separatorType != null && Activator.CreateInstance(separatorType) is object separator2) AddMenuItem(menu, separator2);

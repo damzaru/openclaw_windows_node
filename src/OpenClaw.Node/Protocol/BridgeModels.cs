@@ -13,6 +13,7 @@ namespace OpenClaw.Node.Protocol
         [JsonPropertyName("paramsJSON")] public string? ParamsJSON { get; set; }
         [JsonPropertyName("timeoutMs")] public int? TimeoutMs { get; set; }
         [JsonPropertyName("idempotencyKey")] public string? IdempotencyKey { get; set; }
+        [JsonPropertyName("sessionKey")] public string? SessionKey { get; set; }
     }
 
     public class BridgeInvokeResponse
@@ -62,6 +63,8 @@ namespace OpenClaw.Node.Protocol
         MicPermissionRequired,
         MicBusy,
         PttBusy,
+        ComputerStaleObservation,
+        ResourceExhausted,
     }
 
     public sealed class OpenClawNodeErrorCodeConverter : JsonConverter<OpenClawNodeErrorCode>
@@ -81,6 +84,8 @@ namespace OpenClaw.Node.Protocol
                 "MIC_PERMISSION_REQUIRED" => OpenClawNodeErrorCode.MicPermissionRequired,
                 "MIC_BUSY" => OpenClawNodeErrorCode.MicBusy,
                 "PTT_BUSY" => OpenClawNodeErrorCode.PttBusy,
+                "COMPUTER_STALE_OBSERVATION" => OpenClawNodeErrorCode.ComputerStaleObservation,
+                "RESOURCE_EXHAUSTED" => OpenClawNodeErrorCode.ResourceExhausted,
                 _ => OpenClawNodeErrorCode.Unavailable,
             };
         }
@@ -99,6 +104,8 @@ namespace OpenClaw.Node.Protocol
                 OpenClawNodeErrorCode.MicPermissionRequired => "MIC_PERMISSION_REQUIRED",
                 OpenClawNodeErrorCode.MicBusy => "MIC_BUSY",
                 OpenClawNodeErrorCode.PttBusy => "PTT_BUSY",
+                OpenClawNodeErrorCode.ComputerStaleObservation => "COMPUTER_STALE_OBSERVATION",
+                OpenClawNodeErrorCode.ResourceExhausted => "RESOURCE_EXHAUSTED",
                 _ => "UNAVAILABLE",
             });
         }

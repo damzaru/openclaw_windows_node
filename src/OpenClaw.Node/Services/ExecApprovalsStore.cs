@@ -83,21 +83,21 @@ namespace OpenClaw.Node.Services
             "rundll32", "rundll32.exe", "regsvr32", "regsvr32.exe", "certutil", "certutil.exe",
         };
 
-        public static NativeSnapshot ReadSnapshot()
+        public static NativeSnapshot ReadSnapshot(bool allowUnrestrictedExecutionPolicy = false)
         {
             lock (Gate)
             {
                 var policy = ReadPolicyUnsafe();
-                return ToSnapshot(policy);
+                return ToSnapshot(policy, allowUnrestrictedExecutionPolicy);
             }
         }
 
-        public static NativeSnapshot Save(NativePolicy incoming, string? baseHash)
+        public static NativeSnapshot Save(NativePolicy incoming, string? baseHash, bool allowUnrestrictedExecutionPolicy = false)
         {
             lock (Gate)
             {
                 var current = ReadPolicyUnsafe();
-                var currentSnapshot = ToSnapshot(current);
+                var currentSnapshot = ToSnapshot(current, allowUnrestrictedExecutionPolicy);
                 if (string.IsNullOrWhiteSpace(baseHash))
                 {
                     throw new InvalidOperationException("INVALID_REQUEST: exec approvals base hash required; reload and retry");
@@ -107,9 +107,9 @@ namespace OpenClaw.Node.Services
                     throw new InvalidOperationException("INVALID_REQUEST: exec approvals changed; reload and retry");
                 }
 
-                var next = NormalizeAndValidate(incoming, current.DefaultAction);
+                var next = NormalizeAndValidate(incoming, currentSnapshot.DefaultAction, allowUnrestrictedExecutionPolicy);
                 WritePolicyUnsafe(next);
-                return ToSnapshot(next);
+                return ToSnapshot(next, allowUnrestrictedExecutionPolicy);
             }
         }
 
@@ -158,9 +158,9 @@ namespace OpenClaw.Node.Services
             return JsonSerializer.Deserialize<NativeSetParams>(json, JsonOptions) ?? new NativeSetParams();
         }
 
-        public static Decision Evaluate(string commandText, IReadOnlyList<string> argv)
+        public static Decision Evaluate(string commandText, IReadOnlyList<string> argv, bool allowUnrestrictedExecutionPolicy = false)
         {
-            var snapshot = ReadSnapshot();
+            var snapshot = ReadSnapshot(allowUnrestrictedExecutionPolicy);
             var shell = ResolveShell(argv.Count > 0 ? argv[0] : string.Empty);
             foreach (var rule in snapshot.Rules)
             {
@@ -180,7 +180,7 @@ namespace OpenClaw.Node.Services
                 var parsed = JsonSerializer.Deserialize<StoredPolicy>(File.ReadAllText(path, Encoding.UTF8), JsonOptions);
                 return parsed == null
                     ? new StoredPolicy()
-                    : NormalizeAndValidate(new NativePolicy { DefaultAction = parsed.DefaultAction, Rules = parsed.Rules }, Deny);
+                    : NormalizeAndValidate(new NativePolicy { DefaultAction = parsed.DefaultAction, Rules = parsed.Rules }, Deny, allowUnrestrictedExecutionPolicy: true);
             }
             catch
             {
@@ -197,14 +197,14 @@ namespace OpenClaw.Node.Services
             SecureStore.AtomicWrite(path, bytes);
         }
 
-        private static StoredPolicy NormalizeAndValidate(NativePolicy incoming, string currentDefault)
+        private static StoredPolicy NormalizeAndValidate(NativePolicy incoming, string currentDefault, bool allowUnrestrictedExecutionPolicy)
         {
             if (incoming.Rules == null) throw new InvalidOperationException("INVALID_REQUEST: exec approvals rules are required");
             if (incoming.Rules.Count > 512) throw new InvalidOperationException("INVALID_REQUEST: exec approvals supports at most 512 rules");
             var defaultAction = NormalizeAction(incoming.DefaultAction ?? currentDefault, "defaultAction");
-            if (defaultAction == Allow)
+            if (defaultAction == Allow && !allowUnrestrictedExecutionPolicy)
             {
-                throw new InvalidOperationException("INVALID_REQUEST: defaultAction=allow is not permitted on Windows");
+                throw new InvalidOperationException("INVALID_REQUEST: defaultAction=allow requires the local companion setting 'Allow unrestricted exec policies'; enable it in Settings, save/restart, then reload the Gateway policy");
             }
 
             var rules = new List<NativeRule>(incoming.Rules.Count);
@@ -221,7 +221,7 @@ namespace OpenClaw.Node.Services
                 shells = shells?.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 var description = rule.Description?.Trim();
                 if (description?.Length > 1024) throw new InvalidOperationException($"INVALID_REQUEST: rule {index + 1} description is too long");
-                if (action == Allow) ValidateAllowRule(pattern, index + 1);
+                if (action == Allow && !allowUnrestrictedExecutionPolicy) ValidateAllowRule(pattern, index + 1);
                 rules.Add(new NativeRule
                 {
                     Pattern = pattern,
@@ -297,25 +297,39 @@ namespace OpenClaw.Node.Services
             return whitespace < 0 ? command : command[..whitespace];
         }
 
-        private static NativeSnapshot ToSnapshot(StoredPolicy policy)
+        private static NativeSnapshot ToSnapshot(StoredPolicy policy, bool allowUnrestrictedExecutionPolicy)
         {
-            var canonical = JsonSerializer.SerializeToUtf8Bytes(policy, new JsonSerializerOptions(JsonOptions) { WriteIndented = false });
+            // Include the local permission ceiling in the CAS identity. A snapshot obtained
+            // before an opt-in/revocation cannot authorize an update after that change.
+            var canonical = JsonSerializer.SerializeToUtf8Bytes(new { policy, allowUnrestrictedExecutionPolicy }, new JsonSerializerOptions(JsonOptions) { WriteIndented = false });
             var hash = "sha256:" + Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
+            var effectiveRules = policy.Rules.Select(rule => new NativeRule
+            {
+                Pattern = rule.Pattern, Action = rule.Action, Shells = rule.Shells?.ToList(), Description = rule.Description,
+                Enabled = !allowUnrestrictedExecutionPolicy && rule.Action == Allow && IsUnrestrictedAllowRule(rule.Pattern) ? false : rule.Enabled,
+            }).ToList();
             return new NativeSnapshot
             {
                 Hash = hash,
                 BaseHash = hash,
-                DefaultAction = policy.DefaultAction,
-                Rules = policy.Rules,
+                DefaultAction = !allowUnrestrictedExecutionPolicy && policy.DefaultAction == Allow ? Deny : policy.DefaultAction,
+                Rules = effectiveRules,
+                Constraints = BuildConstraints(allowUnrestrictedExecutionPolicy),
             };
         }
 
-        private static object BuildConstraints() => new
+        private static bool IsUnrestrictedAllowRule(string pattern)
+        {
+            try { ValidateAllowRule(pattern, 0); return false; }
+            catch (InvalidOperationException) { return true; }
+        }
+
+        private static object BuildConstraints(bool allowUnrestrictedExecutionPolicy = false) => new
         {
             baseHashRequired = true,
-            defaultAllowAllowed = false,
-            broadAllowRulesAllowed = false,
-            dangerousAllowRulesAllowed = false,
+            defaultAllowAllowed = allowUnrestrictedExecutionPolicy,
+            broadAllowRulesAllowed = allowUnrestrictedExecutionPolicy,
+            dangerousAllowRulesAllowed = allowUnrestrictedExecutionPolicy,
         };
 
         private static string ResolvePath()

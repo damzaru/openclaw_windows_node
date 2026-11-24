@@ -6,7 +6,7 @@ using System.Text.Json.Serialization;
 namespace OpenClaw.Node.Protocol
 {
     /// <summary>
-    /// Wire constants pinned to OpenClaw Gateway 2026.7.2. Native node clients
+    /// Wire constants verified against OpenClaw Gateway 2026.11.4. Native node clients
     /// may negotiate the previous node protocol, while operator clients must
     /// speak the current protocol.
     /// </summary>
@@ -17,7 +17,7 @@ namespace OpenClaw.Node.Protocol
         public const int MaximumNodeProtocolVersion = 4;
         public const int MaximumInvokeInputBytes = 16 * 1024;
         public const int MaximumProgressChunkBytes = 16 * 1024;
-        public const int DefaultMaximumFrameBytes = 8 * 1024 * 1024;
+        public const int DefaultMaximumFrameBytes = 25 * 1024 * 1024;
         public const int DefaultHandshakeTimeoutMs = 15_000;
         public const int DefaultRequestTimeoutMs = 30_000;
     }
@@ -27,9 +27,11 @@ namespace OpenClaw.Node.Protocol
         [JsonPropertyName("id")] public string Id { get; set; } = "node-host";
         [JsonPropertyName("displayName")] public string? DisplayName { get; set; }
         [JsonPropertyName("version")] public string Version { get; set; } = "dev";
+        [JsonPropertyName("buildId")] public string? BuildId { get; set; }
         [JsonPropertyName("platform")] public string Platform { get; set; } = "windows";
         [JsonPropertyName("deviceFamily")] public string? DeviceFamily { get; set; } = "Windows";
         [JsonPropertyName("modelIdentifier")] public string? ModelIdentifier { get; set; }
+        [JsonPropertyName("timeZone")] public string? TimeZone { get; set; }
         [JsonPropertyName("mode")] public string Mode { get; set; } = "node";
         [JsonPropertyName("instanceId")] public string? InstanceId { get; set; }
     }
@@ -62,6 +64,7 @@ namespace OpenClaw.Node.Protocol
         [JsonPropertyName("client")] public Dictionary<string, object> Client { get; set; } = new();
         [JsonPropertyName("caps")] public List<string> Caps { get; set; } = new();
         [JsonPropertyName("commands")] public List<string> Commands { get; set; } = new();
+        [JsonPropertyName("computerUse")] public object? ComputerUse { get; set; }
         [JsonPropertyName("permissions")] public Dictionary<string, bool> Permissions { get; set; } = new();
         [JsonPropertyName("pathEnv")] public string? PathEnv { get; set; }
         [JsonPropertyName("role")] public string Role { get; set; } = "node";
@@ -88,9 +91,11 @@ namespace OpenClaw.Node.Protocol
                 Id = StringValue("id", "node-host"),
                 DisplayName = OptionalStringValue("displayName"),
                 Version = StringValue("version", "dev"),
+                BuildId = OptionalStringValue("buildId"),
                 Platform = StringValue("platform", "windows"),
                 DeviceFamily = OptionalStringValue("deviceFamily") ?? "Windows",
                 ModelIdentifier = OptionalStringValue("modelIdentifier"),
+                TimeZone = OptionalStringValue("timeZone"),
                 Mode = StringValue("mode", Role == "node" ? "node" : "ui"),
                 InstanceId = OptionalStringValue("instanceId"),
             };
@@ -129,17 +134,30 @@ namespace OpenClaw.Node.Protocol
         [JsonPropertyName("event")] public string Event { get; set; } = string.Empty;
         [JsonPropertyName("payload")] public object? Payload { get; set; }
         [JsonPropertyName("seq")] public long? Seq { get; set; }
-        [JsonPropertyName("stateVersion")] public long? StateVersion { get; set; }
+        [JsonPropertyName("stateVersion")] public GatewayStateVersion? StateVersion { get; set; }
+        [JsonPropertyName("recipientProfileId")] public string? RecipientProfileId { get; set; }
     }
+
+    public sealed class GatewayStateVersion
+    {
+        [JsonPropertyName("presence")] public long Presence { get; set; }
+        [JsonPropertyName("health")] public long Health { get; set; }
+    }
+
+    public sealed record GatewayConnectFailure(GatewayErrorShape Error, bool ReconnectPaused, bool DeviceTokenRetryPending);
 
     public sealed class GatewayFeatureSet
     {
         [JsonPropertyName("methods")] public List<string> Methods { get; set; } = new();
         [JsonPropertyName("events")] public List<string> Events { get; set; } = new();
+        [JsonPropertyName("capabilities")] public List<string> Capabilities { get; set; } = new();
     }
 
     public sealed class HelloAuthPayload
     {
+        [JsonPropertyName("method")] public string? Method { get; set; }
+        [JsonPropertyName("sessionCap")] public string? SessionCap { get; set; }
+        [JsonPropertyName("issuedAtMs")] public long? IssuedAtMs { get; set; }
         [JsonPropertyName("role")] public string? Role { get; set; }
         [JsonPropertyName("scopes")] public List<string> Scopes { get; set; } = new();
         [JsonPropertyName("deviceToken")] public string? DeviceToken { get; set; }
@@ -160,6 +178,7 @@ namespace OpenClaw.Node.Protocol
         [JsonPropertyName("server")] public JsonElement? Server { get; set; }
         [JsonPropertyName("features")] public GatewayFeatureSet? Features { get; set; }
         [JsonPropertyName("snapshot")] public JsonElement? Snapshot { get; set; }
+        [JsonPropertyName("controlUiUrl")] public string? ControlUiUrl { get; set; }
         [JsonPropertyName("pluginSurfaceUrls")] public Dictionary<string, string> PluginSurfaceUrls { get; set; } = new();
         [JsonPropertyName("auth")] public HelloAuthPayload? Auth { get; set; }
         [JsonPropertyName("policy")] public PolicyConfig? Policy { get; set; }

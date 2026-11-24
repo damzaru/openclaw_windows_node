@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import crypto from 'node:crypto';
-import { logger } from '../../logger.js';
+import { logger } from '../../utils/logger.js';
 const MAX_BUFFER_SIZE = 1000;
 const DEFAULT_CLEARCUT_ENDPOINT = 'https://play.googleapis.com/log?format=json_proto';
 const DEFAULT_FLUSH_INTERVAL_MS = 15 * 60 * 1000;
@@ -42,13 +42,14 @@ export class ClearcutSender {
             this.#sessionId = crypto.randomUUID();
             this.#sessionCreated = Date.now();
         }
-        logger('Enqueing telemetry event', JSON.stringify(event, null, 2));
-        this.#addToBuffer({
+        const eventToSend = {
             ...event,
             session_id: this.#sessionId,
             app_version: this.#appVersion,
             os_type: this.#osType,
-        });
+        };
+        logger?.('Enqueing telemetry event', JSON.stringify(eventToSend, null, 2));
+        this.#addToBuffer(eventToSend);
         if (!this.#timerStarted) {
             this.#timerStarted = true;
             this.#scheduleFlush(this.#flushIntervalMs);
@@ -68,10 +69,10 @@ export class ClearcutSender {
                 this.#finalFlush(),
                 new Promise(resolve => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
             ]);
-            logger('Final flush completed');
+            logger?.('Final flush completed');
         }
         catch (error) {
-            logger('Final flush failed:', error);
+            logger?.('Final flush failed:', error);
         }
     }
     async #flush() {
@@ -96,7 +97,7 @@ export class ClearcutSender {
                 }
             }
             else if (result.isPermanentError) {
-                logger('Permanent error, dropped batch of', eventsToSend.length, 'events');
+                logger?.('Permanent error, dropped batch of', eventsToSend.length, 'events');
             }
             else {
                 // Transient error: Requeue events at the front of the buffer
@@ -107,7 +108,7 @@ export class ClearcutSender {
         catch (error) {
             // Safety catch for unexpected errors, requeue events
             this.#buffer = [...eventsToSend, ...this.#buffer];
-            logger('Flush failed unexpectedly:', error);
+            logger?.('Flush failed unexpectedly:', error);
         }
         finally {
             this.#isFlushing = false;
@@ -117,7 +118,7 @@ export class ClearcutSender {
     #addToBuffer(event) {
         if (this.#buffer.length >= MAX_BUFFER_SIZE) {
             this.#buffer.shift();
-            logger('Telemetry buffer overflow: dropped oldest event');
+            logger?.('Telemetry buffer overflow: dropped oldest event');
         }
         this.#buffer.push({
             event,
@@ -125,18 +126,18 @@ export class ClearcutSender {
         });
     }
     #scheduleFlush(delayMs) {
-        logger(`Scheduling flush in ${delayMs}`);
+        logger?.(`Scheduling flush in ${delayMs}`);
         if (this.#flushTimer) {
             clearTimeout(this.#flushTimer);
         }
         this.#flushTimer = setTimeout(() => {
             this.#flush().catch(err => {
-                logger('Flush error:', err);
+                logger?.('Flush error:', err);
             });
         }, delayMs);
     }
     async #sendBatch(events) {
-        logger(`Sending batch of ${events.length}`);
+        logger?.(`Sending batch of ${events.length}`);
         const requestBody = {
             log_source: LOG_SOURCE,
             request_time_ms: Date.now().toString(),
@@ -175,7 +176,7 @@ export class ClearcutSender {
             if (status >= 500 || status === 429) {
                 return { success: false };
             }
-            logger('Telemetry permanent error:', status);
+            logger?.('Telemetry permanent error:', status);
             return { success: false, isPermanentError: true };
         }
         catch {
@@ -201,3 +202,4 @@ export class ClearcutSender {
         return this.#buffer.length;
     }
 }
+//# sourceMappingURL=ClearcutSender.js.map

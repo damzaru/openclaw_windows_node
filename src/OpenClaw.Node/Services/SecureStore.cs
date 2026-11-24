@@ -8,8 +8,8 @@ using System.Text.Json.Serialization;
 namespace OpenClaw.Node.Services
 {
     /// <summary>
-    /// Small CurrentUser-DPAPI store for companion-owned secrets. Gateway
-    /// configuration remains an import-only compatibility source.
+    /// Small CurrentUser-DPAPI store for companion-owned settings and secrets.
+    /// Shared Gateway configuration is not read or modified by the companion.
     /// </summary>
     public sealed class SecureStore
     {

@@ -1,21 +1,19 @@
 using System;
-using System.IO;
 
 namespace OpenClaw.Node.Tray
 {
-    public sealed record OnboardingAssessment(bool Ready, string StatusText, string ActionHint, string? Details = null);
+    public sealed record OnboardingAssessment(bool Ready, string StatusText, string ActionHint);
 
     public static class OnboardingAdvisor
     {
-        public static OnboardingAssessment Evaluate(string gatewayUrl, string gatewayToken, string configPath, string? configReadError = null)
+        public static OnboardingAssessment Evaluate(string gatewayUrl, string gatewayToken, bool hasStoredDeviceToken = false)
         {
-            if (string.IsNullOrWhiteSpace(gatewayToken))
+            if (string.IsNullOrWhiteSpace(gatewayToken) && !hasStoredDeviceToken)
             {
                 return new OnboardingAssessment(
                     false,
                     "Onboarding: Gateway token missing",
-                    "Open Settings and enter the Gateway token",
-                    configReadError);
+                    "Open Settings and enter the Gateway token");
             }
 
             if (!Uri.TryCreate(gatewayUrl, UriKind.Absolute, out var uri) ||

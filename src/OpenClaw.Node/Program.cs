@@ -15,38 +15,76 @@ namespace OpenClaw.Node
     {
         static async Task Main(string[] args)
         {
+#if WINDOWS
+            // Screen capture and SendInput must share physical-pixel coordinates
+            // across displays with different scale factors, before any HWND exists.
+            System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
+#endif
+            if (HasArg(args, "--version"))
+            {
+                Console.WriteLine($"OpenClaw Windows Companion {BuildInfo.BuildVersion}");
+                return;
+            }
+            using var logs = CompanionLog.Start();
+            if (HasArg(args, "--maintain-browser-profile"))
+            {
+                try
+                {
+                    var settings = new CompanionSettingsStore().Load();
+                    var legacy = GetArgValue(args, "--legacy-browser-profile");
+                    var result = await Task.Run(() => new BrowserProfileService(legacyDirectory: string.IsNullOrWhiteSpace(legacy) ? null : legacy)
+                        .Maintain(settings.BrowserDiskCacheMiB, settings.BrowserCodeCacheMiB, clear: HasArg(args, "--clear-browser-cache")));
+                    Console.WriteLine(JsonSerializer.Serialize(result));
+                }
+                catch (Exception error) { Environment.ExitCode = 1; Console.Error.WriteLine("[BROWSER] Profile maintenance failed: " + error.Message); }
+                return;
+            }
+            AppDomain.CurrentDomain.UnhandledException += (_, e) => Console.Error.WriteLine("[FATAL] Unhandled exception: " + e.ExceptionObject);
+            TaskScheduler.UnobservedTaskException += (_, e) => Console.Error.WriteLine("[ERROR] Unobserved background exception: " + e.Exception);
+            try { await RunAsync(args); }
+            catch (Exception ex) { Environment.ExitCode = 1; Console.Error.WriteLine("[FATAL] Startup failure: " + ex); }
+            finally { Console.WriteLine($"[INFO] Companion exited. ExitCode={Environment.ExitCode}"); }
+        }
+
+        private static async Task RunAsync(string[] args)
+        {
             var startedAtUtc = DateTimeOffset.UtcNow;
             Console.WriteLine($"OpenClaw Node for Windows starting... build={BuildInfo.BuildVersion}");
+            Console.WriteLine($"[VERSION] Gateway source={BuildInfo.GatewaySourceCommit} synced={BuildInfo.GatewaySyncDate} revision={BuildInfo.CompanionRevision}");
+            Console.WriteLine($"[STARTUP] pid={Environment.ProcessId} runtime={System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription} baseDirectory={AppContext.BaseDirectory}");
+            Console.WriteLine($"[LOG] Persistent logs: {CompanionLog.DirectoryPath}");
 
-            var configPath = GetOpenClawConfigPath();
             var settingsStore = new CompanionSettingsStore();
             var hasSavedSettings = settingsStore.HasSavedSettings;
             var settings = settingsStore.Load();
-            var forceTray = HasArg(args, "--tray");
-            var disableTray = HasArg(args, "--no-tray");
-            var trayEnabled = !disableTray && (forceTray || OperatingSystem.IsWindows());
-            string url = ResolveGatewayUrl(args, out var configReadErrorUrl);
-            string token = ResolveGatewayToken(args, out var configReadErrorToken);
-            var explicitUrl = HasArg(args, "--gateway-url") || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_URL"));
-            var explicitToken = HasArg(args, "--gateway-token") || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_TOKEN"));
-            if (!explicitUrl && hasSavedSettings) url = settings.GatewayUrl;
-            if (!explicitToken && hasSavedSettings) token = settings.GatewayToken ?? string.Empty;
-            if (!explicitToken && !hasSavedSettings && !string.IsNullOrWhiteSpace(token))
+            ManagedBrowserHost.ConfigureCache(settings);
+            try
             {
-                // One-time, read-only import from the legacy config into the
-                // companion's CurrentUser-DPAPI store.
-                settings.GatewayUrl = url;
-                settings.GatewayToken = token;
-                settingsStore.Save(settings);
+                var profile = await ManagedBrowserHost.MaintainProfileAsync();
+                Console.WriteLine($"[BROWSER] Profile={profile.ProfilePath} migrated={profile.Migrated} removedCacheBytes={profile.RemovedCacheBytes} browserRunning={profile.BrowserRunning}");
             }
-            var configReadError = configReadErrorUrl ?? configReadErrorToken;
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+            { Console.WriteLine("[BROWSER] Profile/cache maintenance deferred: " + error.Message); }
+            using var browserMaintenance = new System.Threading.Timer(_ => ManagedBrowserHost.MaintainProfileIfIdle(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+            var forceTray = HasArg(args, "--tray");
+            var diagnostic = HasArg(args, "--diagnose-connection");
+            var disableTray = HasArg(args, "--no-tray") || diagnostic;
+            var trayEnabled = !disableTray && (forceTray || OperatingSystem.IsWindows());
+            var (url, token) = ResolveConnectionSettings(args, settings, hasSavedSettings);
+            CompanionLog.RegisterSecret(token);
+            CompanionLog.RegisterSecret(settings.GatewayToken);
+            CompanionLog.RegisterSecret(settings.DesktopVncPassword);
             var hasGatewayToken = !string.IsNullOrWhiteSpace(token);
             var hasStoredNodeToken = !hasGatewayToken && HasStoredDeviceToken(url, "node");
             var hasGatewayCredential = hasGatewayToken || hasStoredNodeToken;
+            Console.WriteLine($"[STARTUP] Gateway={url} settingsSaved={hasSavedSettings} sharedCredentialPresent={hasGatewayToken} storedNodeCredentialPresent={hasStoredNodeToken} tray={trayEnabled} diagnostic={diagnostic}");
+            Console.WriteLine($"[POLICY] Unrestricted execution policies permitted by local setting: {settings.AllowUnrestrictedExecutionPolicy}");
+            Console.WriteLine($"[FILES] Local file read opt-in: {settings.EnableFileRead}; local file write opt-in: {settings.EnableFileWrite}");
 
             if (!hasGatewayCredential && !trayEnabled)
             {
                 Console.WriteLine("[FATAL] Missing gateway token. Set OPENCLAW_GATEWAY_TOKEN, pass --gateway-token <token>, or run with --tray and open Settings.");
+                Environment.ExitCode = 2;
                 return;
             }
 
@@ -65,7 +103,9 @@ namespace OpenClaw.Node
                     { "displayName", Environment.MachineName },
                     { "platform", "windows" },
                     { "mode", "node" },
-                    { "version", $"dev+{BuildInfo.BuildVersion}" },
+                    { "version", BuildInfo.BuildVersion },
+                    { "buildId", BuildInfo.BuildId },
+                    { "timeZone", GetLocalIanaTimeZone() },
                     { "instanceId", instanceId },
                     { "deviceFamily", "Windows" }
                 },
@@ -74,6 +114,7 @@ namespace OpenClaw.Node
                 UserAgent = Environment.OSVersion.VersionString,
                 Scopes = new List<string>(),
                 Commands = manifest.GatewayCommands.ToList(),
+                ComputerUse = settings.EnableComputerControl ? ComputerControlService.Descriptor(instanceId) : null,
                 Permissions = new Dictionary<string, bool>()
             };
 
@@ -89,7 +130,9 @@ namespace OpenClaw.Node
                     { "displayName", $"{Environment.MachineName} Companion" },
                     { "platform", "windows" },
                     { "mode", "ui" },
-                    { "version", $"dev+{BuildInfo.BuildVersion}" },
+                    { "version", BuildInfo.BuildVersion },
+                    { "buildId", BuildInfo.BuildId },
+                    { "timeZone", GetLocalIanaTimeZone() },
                     { "instanceId", instanceId },
                     { "deviceFamily", "Windows" }
                 },
@@ -98,11 +141,13 @@ namespace OpenClaw.Node
             };
 
             using var cts = new CancellationTokenSource();
+            if (diagnostic) { Environment.ExitCode = 3; cts.CancelAfter(TimeSpan.FromSeconds(25)); }
             var restartRequested = false;
 
             var core = new CoreMethodService(startedAtUtc);
             var ipcCredential = new IpcCredentialService().LoadOrCreate();
-            using var ipc = new IpcPipeServerService(version: "dev", authToken: ipcCredential);
+            CompanionLog.RegisterSecret(ipcCredential);
+            using var ipc = new IpcPipeServerService(version: BuildInfo.BuildVersion, authToken: ipcCredential);
             var gatewayOptions = new GatewayConnectionOptions { TlsCertificateSha256 = settings.TlsCertificateSha256 };
             using var connection = new GatewayConnection(url, token, connectParams, gatewayOptions);
             using var operatorConnection = settings.EnableTalkPushToTalk || settings.EnableCanvas
@@ -124,11 +169,11 @@ namespace OpenClaw.Node
             var reconnectStartedAtUtc = (DateTimeOffset?)null;
             long? lastReconnectMs = null;
             var authDialogShown = false;
-            var onboarding = OnboardingAdvisor.Evaluate(url, token, configPath, configReadError);
+            var onboarding = OnboardingAdvisor.Evaluate(url, token, hasStoredNodeToken);
 
             void SetTray(NodeRuntimeState state, string message)
             {
-                trayStatus.Set(state, message, core.PendingPairCount, lastReconnectMs, onboarding.StatusText);
+                trayStatus.Set(state, message, core.PendingPairCount, lastReconnectMs, onboarding.StatusText, connection.IsConnected ? connection.ServerVersion : null);
             }
 
             if (trayEnabled)
@@ -137,7 +182,7 @@ namespace OpenClaw.Node
                     ? new WindowsNotifyIconTrayHost(
                         log: msg => Console.WriteLine(msg),
                         onOpenLogs: () => OpenLogsFolder(),
-                        onOpenConfig: () => OpenConfigFile(configPath),
+                        onClearBrowserCache: BrowserCacheDialog.Show,
                         onOpenSettings: () =>
                         {
                             if (!CompanionSettingsDialog.Show(settingsStore)) return;
@@ -154,17 +199,6 @@ namespace OpenClaw.Node
             {
                 Console.WriteLine(msg);
 
-                var lowered = msg.ToLowerInvariant();
-                var isAuthSignal = lowered.Contains("connect rejected") || lowered.Contains("unauthorized") || lowered.Contains("forbidden") || lowered.Contains("auth") || lowered.Contains("token") || lowered.Contains("pre-connect-close");
-                if (isAuthSignal && !authDialogShown && hasGatewayCredential)
-                {
-                    authDialogShown = true;
-                    SetTray(NodeRuntimeState.Disconnected, "Authentication failed (check token)");
-                    ShowUserWarningDialog(
-                        "OpenClaw Authentication Failed",
-                        "The gateway rejected node authentication.\n\nOpen Settings, verify the Gateway token, save, and restart the companion.");
-                }
-
                 if (msg.Contains("Reconnecting in", StringComparison.OrdinalIgnoreCase))
                 {
                     reconnectStartedAtUtc ??= DateTimeOffset.UtcNow;
@@ -174,6 +208,8 @@ namespace OpenClaw.Node
             connection.OnConnected += () =>
             {
                 Console.WriteLine("[INFO] Connected to Gateway.");
+                Console.WriteLine($"[VERSION] Connected Gateway={connection.ServerVersion ?? "unknown"}; companion={BuildInfo.BuildVersion}; referenceSourcePackage={BuildInfo.GatewaySourceVersion}");
+                if (diagnostic) { Environment.ExitCode = 0; cts.Cancel(); return; }
                 authDialogShown = false;
                 if (reconnectStartedAtUtc.HasValue)
                 {
@@ -183,24 +219,40 @@ namespace OpenClaw.Node
                 SetTray(NodeRuntimeState.Connected, "Connected to Gateway");
                 _ = discovery.TriggerAnnounceAsync("gateway-connected", CancellationToken.None);
             };
+            connection.OnTransportFailure += _ =>
+            {
+                SetTray(NodeRuntimeState.Reconnecting, "Transport connection failed; see logs");
+                if (diagnostic) { Environment.ExitCode = 3; cts.Cancel(); }
+            };
             connection.OnDisconnected += () =>
             {
+                _ = executor.ResetSessionAsync();
                 Console.WriteLine("[INFO] Disconnected from Gateway.");
                 reconnectStartedAtUtc = DateTimeOffset.UtcNow;
                 SetTray(NodeRuntimeState.Disconnected, "Disconnected from Gateway");
             };
-            connection.OnConnectRejected += errorText =>
+            connection.OnConnectFailure += failure =>
             {
-                var lowered = (errorText ?? string.Empty).ToLowerInvariant();
-                var isAuthIssue = lowered.Contains("token") || lowered.Contains("auth") || lowered.Contains("unauthorized") || lowered.Contains("forbidden") || lowered.Contains("invalid");
-                if (!isAuthIssue || authDialogShown) return;
-
+                var details = failure.Error.Details;
+                var code = details?.ValueKind == JsonValueKind.Object && details.Value.TryGetProperty("code", out var value) && value.ValueKind == JsonValueKind.String
+                    ? value.GetString() ?? failure.Error.Code : failure.Error.Code;
+                var pairing = code.StartsWith("PAIRING_", StringComparison.Ordinal);
+                var hint = details?.ValueKind == JsonValueKind.Object && details.Value.TryGetProperty("remediationHint", out var remediation) && remediation.ValueKind == JsonValueKind.String
+                    ? remediation.GetString() : null;
+                var message = failure.DeviceTokenRetryPending ? "Retrying with stored device credentials" : failure.Error.Message;
+                SetTray(failure.ReconnectPaused ? NodeRuntimeState.Disconnected : NodeRuntimeState.Reconnecting, message);
+                Console.Error.WriteLine($"[Gateway] Connect failure detail={code} paused={failure.ReconnectPaused} deviceTokenRetryPending={failure.DeviceTokenRetryPending}: {failure.Error.Message}");
+                if (!string.IsNullOrWhiteSpace(hint)) Console.Error.WriteLine("[Gateway] Remediation: " + hint);
+                if (diagnostic && !failure.DeviceTokenRetryPending) { Environment.ExitCode = 2; cts.Cancel(); return; }
+                if (!trayEnabled || !failure.ReconnectPaused || authDialogShown) return;
                 authDialogShown = true;
-                SetTray(NodeRuntimeState.Disconnected, "Authentication failed (check token)");
                 ShowUserWarningDialog(
-                    "OpenClaw Authentication Failed",
-                    "Gateway rejected this node authentication.\n\nOpen Settings, verify the Gateway token, save, and restart the companion.");
+                    pairing ? "OpenClaw Pairing Required" : "OpenClaw Connection Requires Attention",
+                    failure.Error.Message + "\n\n" + (hint ?? (pairing
+                        ? "Review this device and its requested commands in the Gateway pending pairing requests, then restart the companion."
+                        : "Review the Gateway authentication requirements and companion connection settings, then restart the companion.")));
             };
+            connection.OnConnectRejected += errorText => Console.WriteLine($"[connect] {errorText}");
             if (operatorConnection != null)
             {
                 operatorConnection.OnLog += message => Console.WriteLine($"[operator sidecar] {message}");
@@ -221,7 +273,7 @@ namespace OpenClaw.Node
             {
                 var req = context.Request;
                 Console.WriteLine($"[INVOKE] Received bridge command: {req.Command}");
-                return await executor.ExecuteAsync(req, context.CancellationToken);
+                return await executor.ExecuteContextAsync(context);
             };
 
             if (trayHost != null)
@@ -260,24 +312,24 @@ namespace OpenClaw.Node
                 {
                     SetTray(NodeRuntimeState.Disconnected, "Setup needed: add gateway token");
                     Console.WriteLine("[WARN] Gateway token missing. Tray mode is active; open Settings, enter the token, and restart the companion.");
-                    var details = string.IsNullOrWhiteSpace(onboarding.Details) ? string.Empty : $"\n\nDetails: {onboarding.Details}";
                     ShowUserWarningDialog(
                         title: "OpenClaw Node Setup Required",
-                        message: $"{onboarding.StatusText}.\n\n{onboarding.ActionHint}.\n\nOpen the tray menu → Settings, save your changes, and the companion will restart.{details}");
+                        message: $"{onboarding.StatusText}.\n\n{onboarding.ActionHint}.\n\nOpen the tray menu → Settings, save your changes, and the companion will restart.");
                     await WaitUntilCanceledAsync(cts.Token);
                     return;
                 }
 
-                discovery.Start(cts.Token);
-                ipc.Start(cts.Token);
+                if (!diagnostic) { discovery.Start(cts.Token); ipc.Start(cts.Token); }
                 var runTask = connection.StartAsync(cts.Token);
                 var operatorTask = operatorConnection?.StartAsync(cts.Token) ?? Task.CompletedTask;
-                await Task.WhenAll(runTask, operatorTask);
+                var telemetryTask = PublishHostTelemetryAsync(connection, cts.Token);
+                await Task.WhenAll(runTask, operatorTask, telemetryTask);
             }
             catch (TaskCanceledException) { }
             catch (Exception ex)
             {
-                Console.WriteLine($"[FATAL] {ex.Message}");
+                Environment.ExitCode = 1;
+                Console.Error.WriteLine($"[FATAL] Runtime failure: {ex}");
             }
             finally
             {
@@ -299,7 +351,8 @@ namespace OpenClaw.Node
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[FATAL] Startup failed before runtime guard: {ex.Message}");
+                Environment.ExitCode = 1;
+                Console.Error.WriteLine($"[FATAL] Startup failed before runtime guard: {ex}");
                 if (trayEnabled)
                 {
                     ShowUserWarningDialog(
@@ -321,6 +374,28 @@ namespace OpenClaw.Node
             }
         }
 
+        private static async Task PublishHostTelemetryAsync(GatewayConnection connection, CancellationToken cancellationToken)
+        {
+            var device = new WindowsDeviceService();
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(20));
+            try
+            {
+                do
+                {
+                    if (!connection.IsConnected) continue;
+                    try
+                    {
+                        await connection.SendNodeEventAsync("node.host.stats", device.GetHostStats(), cancellationToken);
+                        if (WindowsDeviceService.GetSystemIdleSeconds() is int idle)
+                            await connection.SendNodeEventAsync("node.presence.activity", new { idleSeconds = idle, source = "system" }, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+                    catch (Exception ex) { Console.WriteLine($"[telemetry] {ex.Message}"); }
+                } while (await timer.WaitForNextTickAsync(cancellationToken));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        }
+
         private static bool HasStoredDeviceToken(string gatewayUrl, string role)
         {
             try
@@ -336,47 +411,20 @@ namespace OpenClaw.Node
             }
         }
 
-        private static string ResolveGatewayUrl(string[] args, out string? configReadError)
+        internal static (string Url, string Token) ResolveConnectionSettings(string[] args, CompanionSettings settings, bool hasSavedSettings)
         {
-            configReadError = null;
-
-            var fromArgs = GetArgValue(args, "--gateway-url");
-            if (!string.IsNullOrWhiteSpace(fromArgs)) return fromArgs;
-
-            var fromEnv = Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_URL");
-            if (!string.IsNullOrWhiteSpace(fromEnv)) return fromEnv;
-
-            var fromConfig = TryReadGatewayUrlFromOpenClawConfig(out configReadError);
-            if (!string.IsNullOrWhiteSpace(fromConfig)) return fromConfig;
-
-            return "ws://127.0.0.1:18789";
-        }
-
-        private static string ResolveGatewayToken(string[] args, out string? configReadError)
-        {
-            configReadError = null;
-
-            var fromArgs = GetArgValue(args, "--gateway-token");
-            if (!string.IsNullOrWhiteSpace(fromArgs)) return fromArgs;
-
-            var fromEnv = Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_TOKEN");
-            if (!string.IsNullOrWhiteSpace(fromEnv)) return fromEnv;
-
-            return TryReadGatewayTokenFromOpenClawConfig(out configReadError) ?? string.Empty;
-        }
-
-        private static string GetOpenClawConfigPath()
-        {
-            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            return Path.Combine(home, ".openclaw", "openclaw.json");
+            static string FirstNonEmpty(string? argument, string? environment, string fallback)
+                => !string.IsNullOrWhiteSpace(argument) ? argument : !string.IsNullOrWhiteSpace(environment) ? environment : fallback;
+            return (
+                FirstNonEmpty(GetArgValue(args, "--gateway-url"), Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_URL"), hasSavedSettings ? settings.GatewayUrl : "ws://127.0.0.1:18789"),
+                FirstNonEmpty(GetArgValue(args, "--gateway-token"), Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_TOKEN"), hasSavedSettings ? settings.GatewayToken ?? string.Empty : string.Empty));
         }
 
         private static void OpenLogsFolder()
         {
             try
             {
-                var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                var dir = Path.Combine(home, ".openclaw");
+                var dir = CompanionLog.DirectoryPath;
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
                 var start = new ProcessStartInfo
@@ -392,35 +440,6 @@ namespace OpenClaw.Node
             catch (Exception ex)
             {
                 Console.WriteLine($"[TRAY] Open logs folder failed: {ex.Message}");
-            }
-        }
-
-        private static void OpenConfigFile(string configPath)
-        {
-            try
-            {
-                var parent = Path.GetDirectoryName(configPath) ?? Directory.GetCurrentDirectory();
-                if (!Directory.Exists(parent)) Directory.CreateDirectory(parent);
-
-                if (!File.Exists(configPath))
-                {
-                    File.WriteAllText(configPath,
-                        "{\n  \"gateway\": {\n    \"host\": \"127.0.0.1\",\n    \"port\": 18789,\n    \"auth\": {\n      \"token\": \"\"\n    }\n  }\n}\n");
-                }
-
-                var start = new ProcessStartInfo
-                {
-                    FileName = "notepad.exe",
-                    Arguments = QuoteForCmd(configPath),
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                ChildProcessSecurity.ScrubSensitiveEnvironment(start);
-                Process.Start(start);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[TRAY] Open config failed: {ex.Message}");
             }
         }
 
@@ -451,7 +470,7 @@ namespace OpenClaw.Node
             var uptime = (long)(DateTimeOffset.UtcNow - startedAtUtc).TotalSeconds;
             var reconnectText = lastReconnectMs.HasValue ? $"{lastReconnectMs.Value}ms" : "n/a";
 
-            return string.Join(Environment.NewLine, new[]
+            return CompanionLog.Redact(string.Join(Environment.NewLine, new[]
             {
                 "OpenClaw Windows Node Diagnostics",
                 $"timeUtc: {DateTimeOffset.UtcNow:O}",
@@ -463,8 +482,15 @@ namespace OpenClaw.Node
                 $"lastReconnect: {reconnectText}",
                 $"uptimeSeconds: {uptime}",
                 $"pid: {Environment.ProcessId}",
-                $"buildVersion: {BuildInfo.BuildVersion}"
-            });
+                $"buildVersion: {BuildInfo.BuildVersion}",
+                $"gatewaySourceVersion: {BuildInfo.GatewaySourceVersion}",
+                $"gatewaySourceCommit: {BuildInfo.GatewaySourceCommit}",
+                $"gatewaySyncDate: {BuildInfo.GatewaySyncDate}",
+                $"companionRevision: {BuildInfo.CompanionRevision}",
+                $"connectedGatewayVersion: {snapshot.GatewayVersion ?? "unknown"}",
+                $"browserProfile: {BrowserProfileService.Default.ProfilePath}",
+                $"logsDirectory: {CompanionLog.DirectoryPath}"
+            }));
         }
 
         private static void CopyDiagnosticsToClipboard(string text)
@@ -558,122 +584,7 @@ namespace OpenClaw.Node
             return null;
         }
 
-        private static string? TryReadGatewayUrlFromOpenClawConfig(out string? error)
-        {
-            error = null;
-
-            if (!TryReadGatewaySection(out var gateway, out error)) return null;
-            return BuildGatewayUrlFromGatewaySection(gateway, out error);
-        }
-
-        internal static string? BuildGatewayUrlFromGatewaySection(JsonElement gateway, out string? error)
-        {
-            error = null;
-
-            var host = "127.0.0.1";
-            if (gateway.TryGetProperty("host", out var hostEl))
-            {
-                if (hostEl.ValueKind != JsonValueKind.String)
-                {
-                    error = "gateway.host must be a string";
-                    return null;
-                }
-
-                var configuredHost = hostEl.GetString();
-                if (string.IsNullOrWhiteSpace(configuredHost))
-                {
-                    error = "gateway.host must not be empty";
-                    return null;
-                }
-
-                host = configuredHost.Trim();
-            }
-
-            var port = 18789;
-            if (gateway.TryGetProperty("port", out var portEl))
-            {
-                if (portEl.ValueKind != JsonValueKind.Number)
-                {
-                    error = "gateway.port must be numeric";
-                    return null;
-                }
-
-                if (!portEl.TryGetInt32(out var parsedPort))
-                {
-                    error = "gateway.port must be an integer in range 1..65535";
-                    return null;
-                }
-
-                if (parsedPort is < 1 or > 65535)
-                {
-                    error = "gateway.port must be in range 1..65535";
-                    return null;
-                }
-
-                port = parsedPort;
-            }
-
-            var normalizedHost = host.Contains(':') && !(host.StartsWith("[") && host.EndsWith("]"))
-                ? $"[{host}]"
-                : host;
-
-            return $"ws://{normalizedHost}:{port}";
-        }
-
-        private static string? TryReadGatewayTokenFromOpenClawConfig(out string? error)
-        {
-            error = null;
-
-            if (!TryReadGatewaySection(out var gateway, out error)) return null;
-            if (!gateway.TryGetProperty("auth", out var auth))
-            {
-                error = "gateway.auth section missing";
-                return null;
-            }
-
-            if (!auth.TryGetProperty("token", out var tokenEl))
-            {
-                error = "gateway.auth.token missing";
-                return null;
-            }
-
-            if (tokenEl.ValueKind != JsonValueKind.String)
-            {
-                error = "gateway.auth.token must be a string";
-                return null;
-            }
-
-            return tokenEl.GetString();
-        }
-
-        private static bool TryReadGatewaySection(out JsonElement gateway, out string? error)
-        {
-            gateway = default;
-            error = null;
-
-            var path = GetOpenClawConfigPath();
-            if (!File.Exists(path))
-            {
-                return false;
-            }
-
-            try
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(path));
-                if (!doc.RootElement.TryGetProperty("gateway", out var gw))
-                {
-                    error = "gateway section missing";
-                    return false;
-                }
-
-                gateway = gw.Clone();
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = ex.Message;
-                return false;
-            }
-        }
+        private static string GetLocalIanaTimeZone()
+            => TimeZoneInfo.TryConvertWindowsIdToIanaId(TimeZoneInfo.Local.Id, out var iana) ? iana : TimeZoneInfo.Local.Id;
     }
 }

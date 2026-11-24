@@ -26,10 +26,10 @@ namespace OpenClaw.Node.Services
             systemName = "Windows",
             systemVersion = Environment.OSVersion.Version.ToString(),
             platform = RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(),
-            appVersion = $"dev+{BuildInfo.BuildVersion}",
-            appBuild = BuildInfo.BuildVersion,
+            appVersion = BuildInfo.BuildVersion,
+            appBuild = BuildInfo.BuildId,
             locale = CultureInfo.CurrentCulture.Name,
-            timeZone = TimeZoneInfo.Local.Id,
+            timeZone = TimeZoneInfo.TryConvertWindowsIdToIanaId(TimeZoneInfo.Local.Id, out var iana) ? iana : TimeZoneInfo.Local.Id,
         };
 
         public object GetStatus()
@@ -64,6 +64,28 @@ namespace OpenClaw.Node.Services
                 },
                 uptimeSeconds = Environment.TickCount64 / 1000d,
             };
+        }
+
+        public object GetHostStats()
+        {
+            var memory = ReadMemory();
+            var drive = new DriveInfo(Path.GetPathRoot(Environment.SystemDirectory) ?? "C:\\");
+            return new
+            {
+                cpuCount = Math.Clamp(Environment.ProcessorCount, 1, 4096),
+                memoryTotalBytes = Math.Max(0, memory.Total),
+                memoryFreeBytes = Math.Clamp(memory.Available, 0, Math.Max(0, memory.Total)),
+                diskTotalBytes = drive.IsReady ? drive.TotalSize : 0,
+                diskAvailableBytes = drive.IsReady ? drive.AvailableFreeSpace : 0,
+            };
+        }
+
+        internal static int? GetSystemIdleSeconds()
+        {
+            if (!OperatingSystem.IsWindows()) return null;
+            var info = new LastInputInfo { Size = (uint)Marshal.SizeOf<LastInputInfo>() };
+            if (!GetLastInputInfo(ref info)) return null;
+            return (int)Math.Min(2_592_000, unchecked((uint)Environment.TickCount - info.Tick) / 1000);
         }
 
         public async Task<string> GetLocationJsonAsync(string? paramsJson, CancellationToken cancellationToken)
@@ -193,13 +215,14 @@ $heading=if($null -ne $coordinate.Heading){[double]$coordinate.Heading}else{$nul
                     return new
                     {
                         level = level is >= 0 and <= 1 ? level : (double?)null,
+                        levelPercent = level is >= 0 and <= 1 ? (int?)Math.Round(level * 100) : null,
                         state = string.Equals(status, "Online", StringComparison.OrdinalIgnoreCase) ? "charging" : "unplugged",
                         lowPowerModeEnabled = false,
                     };
                 }
             }
             catch { }
-            return new { level = (double?)null, state = "unknown", lowPowerModeEnabled = false };
+            return new { level = (double?)null, levelPercent = (int?)null, state = "unknown", lowPowerModeEnabled = false };
         }
 
         private static (long Total, long Available) ReadMemory()
@@ -232,5 +255,10 @@ $heading=if($null -ne $coordinate.Heading){[double]$coordinate.Heading}else{$nul
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LastInputInfo { public uint Size; public uint Tick; }
+        [DllImport("user32.dll")]
+        private static extern bool GetLastInputInfo(ref LastInputInfo info);
     }
 }

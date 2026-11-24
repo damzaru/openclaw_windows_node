@@ -30,6 +30,9 @@ namespace OpenClaw.Node.Services
         private readonly CameraCaptureService _camera = new();
         private readonly CanvasService _canvas;
         private readonly TalkPushToTalkService _talk;
+        private readonly UploadStagingService _uploads = new();
+        private readonly ComputerControlService _computer = new();
+        private readonly FileTransferService _fileTransfer = new();
 
         public NodeCommandExecutor(
             IGatewayRpcClient? rpc = null,
@@ -55,7 +58,10 @@ namespace OpenClaw.Node.Services
             _talk = new TalkPushToTalkService(operatorClient, _settings.TalkSessionKey);
         }
 
-        public async Task<BridgeInvokeResponse> ExecuteAsync(BridgeInvokeRequest request, CancellationToken cancellationToken = default)
+        public Task<BridgeInvokeResponse> ExecuteContextAsync(NodeInvokeContext context)
+            => ExecuteAsync(context.Request, context.CancellationToken, context);
+
+        public async Task<BridgeInvokeResponse> ExecuteAsync(BridgeInvokeRequest request, CancellationToken cancellationToken = default, NodeInvokeContext? context = null)
         {
             try
             {
@@ -72,8 +78,13 @@ namespace OpenClaw.Node.Services
                     "system.run.prepare" => HandleSystemRunPrepare(request),
                     "system.run" => await HandleSystemRunAsync(request, cancellationToken),
                     "fs.listDir" => HandleFsListDir(request),
-                    "browser.proxy" => await HandleBrowserProxyAsync(request, cancellationToken),
+                    "terminal.upload" => await HandleTerminalUploadAsync(request, cancellationToken),
+                    "file.stat" or "file.fetch" or "dir.list" or "dir.fetch" or "file.write" or "file.create"
+                        => Success(request.Id, await _fileTransfer.ExecuteAsync(request.Command, request.ParamsJSON, context, cancellationToken)),
+                    "browser.proxy" or "browser.proxy.upload.v1" => await HandleBrowserProxyAsync(request, cancellationToken),
                     "screen.snapshot" => await HandleScreenSnapshotAsync(request, cancellationToken),
+                    "computer.act" => Success(request.Id, await _computer.ActAsync(request.ParamsJSON, cancellationToken)),
+                    "desktop.stream" => await HandleDesktopStreamAsync(request, cancellationToken),
                     "screen.record" => await HandleScreenRecordAsync(request, cancellationToken),
                     "camera.list" => await HandleCameraListAsync(request, cancellationToken),
                     "camera.snap" => await HandleCameraSnapAsync(request, cancellationToken),
@@ -214,7 +225,7 @@ namespace OpenClaw.Node.Services
         {
             try
             {
-                var snapshot = ExecApprovalsStore.ReadSnapshot();
+                var snapshot = ExecApprovalsStore.ReadSnapshot(_settings.AllowUnrestrictedExecutionPolicy);
                 return new BridgeInvokeResponse
                 {
                     Id = request.Id,
@@ -253,7 +264,7 @@ namespace OpenClaw.Node.Services
                 {
                     DefaultAction = parsed.DefaultAction,
                     Rules = parsed.Rules,
-                }, parsed.BaseHash);
+                }, parsed.BaseHash, _settings.AllowUnrestrictedExecutionPolicy);
                 return new BridgeInvokeResponse
                 {
                     Id = request.Id,
@@ -300,7 +311,7 @@ namespace OpenClaw.Node.Services
                 : null;
 
             var argv = new[] { fileName! }.Concat(args!).ToArray();
-            var approval = ExecApprovalsStore.Evaluate(commandText!, argv);
+            var approval = ExecApprovalsStore.Evaluate(commandText!, argv, _settings.AllowUnrestrictedExecutionPolicy);
             return new BridgeInvokeResponse
             {
                 Id = request.Id,
@@ -315,7 +326,6 @@ namespace OpenClaw.Node.Services
                         commandPreview,
                         agentId,
                         sessionKey,
-                        mutableFileOperand = (object?)null,
                         nativeApproval = new
                         {
                             action = approval.Action,
@@ -367,7 +377,7 @@ namespace OpenClaw.Node.Services
                 return invalid!;
             }
 
-            var approval = ExecApprovalsStore.Evaluate(commandText!, argv);
+            var approval = ExecApprovalsStore.Evaluate(commandText!, argv, _settings.AllowUnrestrictedExecutionPolicy);
             if (!string.Equals(approval.Action, ExecApprovalsStore.Allow, StringComparison.Ordinal))
             {
                 var reason = approval.Action == ExecApprovalsStore.Prompt
@@ -451,13 +461,30 @@ namespace OpenClaw.Node.Services
             return Success(request.Id, new { path = resolved, parent, home, entries = sorted });
         }
 
+        private async Task<BridgeInvokeResponse> HandleDesktopStreamAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            if (_rpc is not IGatewayStreamClient transport) return Unavailable(request.Id, "Desktop stream Gateway transport is unavailable");
+            await DesktopStreamService.RunAsync(request.ParamsJSON, transport, _settings.DesktopVncPort, _settings.DesktopVncPassword, cancellationToken);
+            return Success(request.Id, new { ok = true });
+        }
+
+        private async Task<BridgeInvokeResponse> HandleTerminalUploadAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
+        {
+            var root = ParseParams(request.ParamsJSON);
+            if (!root.HasValue || !root.Value.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String ||
+                !root.Value.TryGetProperty("contentBase64", out var content) || content.ValueKind != JsonValueKind.String)
+                return Invalid(request.Id, "INVALID_REQUEST: terminal upload name and contentBase64 are required");
+            var staged = await _uploads.StageAsync(new[] { new UploadStagingService.UploadFile(name.GetString()!, content.GetString()!) }, false, cancellationToken);
+            return Success(request.Id, new { path = staged.Paths[0], size = staged.Sizes[0] });
+        }
+
         private async Task<BridgeInvokeResponse> HandleScreenSnapshotAsync(BridgeInvokeRequest request, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var root = ParseParams(request.ParamsJSON);
+            var executionId = root.HasValue ? ComputerControlService.ReadExecutionId(root.Value) : null;
             var format = "jpeg";
             var screenIndex = 0;
-            int? requestedScreenIndex = null;
             int? requestedMaxWidth = null;
             var quality = 0.72;
             if (root.HasValue)
@@ -473,7 +500,6 @@ namespace OpenClaw.Node.Services
                 {
                     if (index.ValueKind != JsonValueKind.Number || !index.TryGetInt32(out screenIndex) || screenIndex < 0)
                         return Invalid(request.Id, "INVALID_REQUEST: screen.snapshot screenIndex must be a non-negative integer");
-                    requestedScreenIndex = screenIndex;
                 }
                 if (root.Value.TryGetProperty("maxWidth", out var width))
                 {
@@ -485,6 +511,7 @@ namespace OpenClaw.Node.Services
                     return Invalid(request.Id, "INVALID_REQUEST: screen.snapshot quality must be in (0, 1]");
             }
             var maxWidth = requestedMaxWidth ?? (format == "png" ? 900 : 1600);
+            var topology = _settings.EnableComputerControl ? _computer.CurrentTopology() : null;
             var captured = await _screen.CaptureScreenshotBytesAsync(screenIndex, format == "jpeg" ? "jpg" : "png");
             cancellationToken.ThrowIfCancellationRequested();
             if (captured.bytes.Length == 0) return Unavailable(request.Id, "SCREEN_CAPTURE_UNAVAILABLE: capture returned no image");
@@ -504,10 +531,10 @@ namespace OpenClaw.Node.Services
             {
                 format,
                 base64,
-                displayFrameId = Guid.NewGuid().ToString(),
+                displayFrameId = topology == null ? Guid.NewGuid().ToString() : _computer.RegisterFrame(screenIndex, widthOut, heightOut, topology, executionId),
                 width = widthOut,
                 height = heightOut,
-                screenIndex = requestedScreenIndex,
+                screenIndex,
                 capturedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             });
         }
@@ -705,13 +732,53 @@ namespace OpenClaw.Node.Services
                 Body = root.Value.TryGetProperty("body", out var bodyEl) ? bodyEl.Clone() : null,
             };
 
-            var payloadJson = await _browserProxy.ProxyAsync(proxyRequest, cancellationToken);
-            return new BridgeInvokeResponse
+            UploadStagingService.StagedUpload? staged = null;
+            var hasUpload = root.Value.TryGetProperty("upload", out var upload);
+            if (request.Command == "browser.proxy.upload.v1" && !hasUpload)
+                return Invalid(request.Id, "INVALID_REQUEST: browser.proxy.upload.v1 requires upload");
+            if (request.Command == "browser.proxy" && hasUpload)
+                return Invalid(request.Id, "INVALID_REQUEST: uploads require browser.proxy.upload.v1");
+            if (hasUpload)
             {
-                Id = request.Id,
-                Ok = true,
-                PayloadJSON = payloadJson,
-            };
+                if (!string.Equals(proxyRequest.Method, "POST", StringComparison.OrdinalIgnoreCase) || proxyRequest.Path != "/hooks/file-chooser" ||
+                    proxyRequest.Body is not JsonElement body || body.ValueKind != JsonValueKind.Object || body.TryGetProperty("paths", out _) ||
+                    upload.ValueKind != JsonValueKind.Object || !upload.TryGetProperty("envelope", out var envelope) || envelope.ValueKind != JsonValueKind.String || envelope.GetString() != "browser-upload-v1" ||
+                    !upload.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array)
+                    return Invalid(request.Id, "INVALID_REQUEST: upload requires the file chooser route, browser-upload-v1 envelope, and body without paths");
+                var uploadFiles = new List<UploadStagingService.UploadFile>();
+                foreach (var file in files.EnumerateArray())
+                {
+                    if (file.ValueKind != JsonValueKind.Object || !file.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String ||
+                        !file.TryGetProperty("contentBase64", out var content) || content.ValueKind != JsonValueKind.String)
+                        return Invalid(request.Id, "INVALID_REQUEST: upload files require name and contentBase64");
+                    uploadFiles.Add(new(name.GetString()!, content.GetString()!));
+                }
+                staged = await _uploads.StageAsync(uploadFiles, true, cancellationToken);
+                var fields = body.EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.Clone());
+                fields["paths"] = staged.Paths;
+                proxyRequest.Body = JsonSerializer.SerializeToElement(fields);
+            }
+            try
+            {
+                var payloadJson = await _browserProxy.ProxyAsync(proxyRequest, cancellationToken);
+                return new BridgeInvokeResponse { Id = request.Id, Ok = true, PayloadJSON = payloadJson };
+            }
+            catch (OperationCanceledException) { if (staged != null) _uploads.Discard(staged); throw; }
+            catch (Exception ex)
+            {
+                if (staged != null) _uploads.Discard(staged);
+                if (root.Value.TryGetProperty("errorEnvelope", out var errorEnvelope) && errorEnvelope.ValueKind == JsonValueKind.String && errorEnvelope.GetString() == "browser-v1")
+                {
+                    var status = ex switch
+                    {
+                        BrowserRouteException route => route.Status,
+                        System.Net.Http.HttpRequestException { StatusCode: { } httpStatus } => (int)httpStatus,
+                        _ => ex.Message.StartsWith("INVALID_REQUEST", StringComparison.Ordinal) ? 400 : 503,
+                    };
+                    return Success(request.Id, new { error = new { status, body = new { error = ex.Message } } });
+                }
+                throw;
+            }
         }
 
         private async Task<BridgeInvokeResponse> HandleScreenCaptureAsync(BridgeInvokeRequest request)
@@ -2705,20 +2772,36 @@ namespace OpenClaw.Node.Services
                 invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: command changed after preparation");
                 return false;
             }
-            if (plan.TryGetProperty("commandText", out var plannedText) &&
-                (plannedText.ValueKind != JsonValueKind.String || plannedText.GetString() != commandText))
+            if (!plan.TryGetProperty("commandText", out var plannedText) ||
+                plannedText.ValueKind != JsonValueKind.String || plannedText.GetString() != commandText)
             {
                 invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: command text changed after preparation");
                 return false;
             }
-            if (plan.TryGetProperty("cwd", out var plannedCwd))
+            foreach (var field in new[] { "cwd", "agentId", "sessionKey" })
             {
-                var value = plannedCwd.ValueKind == JsonValueKind.String ? NormalizeNullableString(plannedCwd.GetString()) : null;
-                if (!string.Equals(value, cwd, StringComparison.OrdinalIgnoreCase))
+                var hasPlanned = plan.TryGetProperty(field, out var plannedValue);
+                var hasActual = root.TryGetProperty(field, out var actualValue);
+                if ((hasPlanned && plannedValue.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)) ||
+                    (hasActual && actualValue.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)))
                 {
-                    invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: working directory changed after preparation");
+                    invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: invalid execution plan binding: " + field);
                     return false;
                 }
+                var expected = hasPlanned && plannedValue.ValueKind == JsonValueKind.String ? NormalizeNullableString(plannedValue.GetString()) : null;
+                var actual = field == "cwd" ? cwd : hasActual && actualValue.ValueKind == JsonValueKind.String ? NormalizeNullableString(actualValue.GetString()) : null;
+                if (!string.Equals(expected, actual, field == "cwd" ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                {
+                    invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: execution plan binding changed after preparation: " + field);
+                    return false;
+                }
+            }
+            // This host advertises native approval rules, not portable snapshot/file pinning.
+            // Never silently accept a plan whose additional guarantees cannot be enforced.
+            if (plan.TryGetProperty("mutableFileOperand", out _) || plan.TryGetProperty("policySnapshot", out _))
+            {
+                invalid = Invalid(requestId, "SYSTEM_RUN_DENIED: portable file/policy bindings are not supported by this native approval provider");
+                return false;
             }
             return true;
         }
@@ -2961,6 +3044,10 @@ namespace OpenClaw.Node.Services
                 return OpenClawNodeErrorCode.InvalidRequest;
             if (message.StartsWith("SYSTEM_RUN_DENIED", StringComparison.OrdinalIgnoreCase))
                 return OpenClawNodeErrorCode.SystemRunDenied;
+            if (message.StartsWith("COMPUTER_STALE_OBSERVATION", StringComparison.Ordinal))
+                return OpenClawNodeErrorCode.ComputerStaleObservation;
+            if (message.StartsWith("RESOURCE_EXHAUSTED", StringComparison.Ordinal))
+                return OpenClawNodeErrorCode.ResourceExhausted;
             if (message.StartsWith("MIC_PERMISSION_REQUIRED", StringComparison.OrdinalIgnoreCase))
                 return OpenClawNodeErrorCode.MicPermissionRequired;
             if (message.StartsWith("MIC_BUSY", StringComparison.OrdinalIgnoreCase))
@@ -2976,8 +3063,12 @@ namespace OpenClaw.Node.Services
 
         public void Dispose()
         {
+            _uploads.Dispose();
+            _computer.Dispose();
             _talk.Dispose();
             _canvas.Dispose();
         }
+
+        public Task ResetSessionAsync() => _computer.ResetAsync();
     }
 }

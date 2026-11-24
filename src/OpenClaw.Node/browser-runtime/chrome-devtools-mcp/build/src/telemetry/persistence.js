@@ -7,7 +7,21 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { logger } from '../logger.js';
+import { logger } from '../utils/logger.js';
+import { ClearcutLogger } from './ClearcutLogger.js';
+import { ErrorCode } from './errors.js';
+function isValidTime(time) {
+    if (time === undefined) {
+        return true;
+    }
+    if (typeof time !== 'string' || time === '') {
+        return false;
+    }
+    return !Number.isNaN(new Date(time).getTime());
+}
+function isContextValid(state) {
+    return isValidTime(state.lastActive) && isValidTime(state.lastToolCall);
+}
 const STATE_FILE_NAME = 'telemetry_state.json';
 function getDataFolder() {
     const homedir = os.homedir();
@@ -28,16 +42,27 @@ export class FilePersistence {
         this.#dataFolder = dataFolderOverride ?? getDataFolder();
     }
     async loadState() {
+        const filePath = path.join(this.#dataFolder, STATE_FILE_NAME);
         try {
-            const filePath = path.join(this.#dataFolder, STATE_FILE_NAME);
-            const content = await fs.readFile(filePath, 'utf-8');
-            return JSON.parse(content);
+            await fs.access(filePath);
         }
         catch {
-            return {
-                lastActive: '',
-            };
+            // File doesn't exist. Not an error because new users do not have the state file.
+            return {};
         }
+        let state;
+        try {
+            const content = await fs.readFile(filePath, 'utf-8');
+            state = JSON.parse(content);
+        }
+        catch (error) {
+            logger?.(`Failed to read telemetry state from ${filePath}:`, error);
+            void ClearcutLogger.get()?.logServerError({
+                errorCode: ErrorCode.ERROR_CODE_PERSISTENCE_FILE_READ_FAILED,
+            });
+            return {};
+        }
+        return isContextValid(state) ? state : {};
     }
     async saveState(state) {
         const filePath = path.join(this.#dataFolder, STATE_FILE_NAME);
@@ -47,7 +72,11 @@ export class FilePersistence {
         }
         catch (error) {
             // Ignore errors during state saving to avoid crashing the server
-            logger(`Failed to save telemetry state to ${filePath}:`, error);
+            logger?.(`Failed to save telemetry state to ${filePath}:`, error);
+            void ClearcutLogger.get()?.logServerError({
+                errorCode: ErrorCode.ERROR_CODE_PERSISTENCE_FILE_SAVE_FAILED,
+            });
         }
     }
 }
+//# sourceMappingURL=persistence.js.map

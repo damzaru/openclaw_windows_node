@@ -47,3 +47,4 @@ function resolvePageIndex(pageIdx, totalPages) {
     }
     return { currentPage: pageIdx, invalidPage: false };
 }
+//# sourceMappingURL=pagination.js.map

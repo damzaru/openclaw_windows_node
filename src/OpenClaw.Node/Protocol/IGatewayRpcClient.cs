@@ -1,5 +1,6 @@
 using System.Threading;
 using System.Threading.Tasks;
+using System.Net.WebSockets;
 
 namespace OpenClaw.Node.Protocol
 {
@@ -18,5 +19,11 @@ namespace OpenClaw.Node.Protocol
     {
         string? GetPluginSurfaceUrl(string surface);
         Task<string?> RefreshPluginSurfaceUrlAsync(string surface, CancellationToken cancellationToken);
+    }
+
+    public interface IGatewayStreamClient
+    {
+        Uri GatewayUri { get; }
+        ClientWebSocket CreateStreamSocket();
     }
 }

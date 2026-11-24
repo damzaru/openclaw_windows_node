@@ -10,6 +10,15 @@ namespace OpenClaw.Node.Services
         public string? TlsCertificateSha256 { get; set; }
         public bool StartWithWindows { get; set; }
         public bool EnableBrowserProxy { get; set; } = true;
+        public int BrowserDiskCacheMiB { get; set; } = 128;
+        public int BrowserCodeCacheMiB { get; set; } = 64;
+        public bool AllowUnrestrictedExecutionPolicy { get; set; }
+        public bool EnableFileRead { get; set; }
+        public bool EnableFileWrite { get; set; }
+        public bool EnableComputerControl { get; set; }
+        public bool EnableDesktopSharing { get; set; }
+        public int DesktopVncPort { get; set; } = 5900;
+        public string? DesktopVncPassword { get; set; }
         public bool EnableCanvas { get; set; } = true;
         public bool EnableLocation { get; set; }
         public bool EnableCameraSnapshots { get; set; }
@@ -26,6 +35,11 @@ namespace OpenClaw.Node.Services
             GatewayUrl = string.IsNullOrWhiteSpace(GatewayUrl) ? "ws://127.0.0.1:18789" : GatewayUrl.Trim();
             GatewayToken = NullIfWhiteSpace(GatewayToken);
             TlsCertificateSha256 = NullIfWhiteSpace(TlsCertificateSha256);
+            DesktopVncPort = Math.Clamp(DesktopVncPort, 1, 65535);
+            BrowserDiskCacheMiB = Math.Clamp(BrowserDiskCacheMiB, 16, 2048);
+            BrowserCodeCacheMiB = Math.Clamp(BrowserCodeCacheMiB, 16, 2048);
+            // Whitespace can be part of a VNC password; never change the credential.
+            DesktopVncPassword = string.IsNullOrEmpty(DesktopVncPassword) ? null : DesktopVncPassword;
             TalkSessionKey = string.IsNullOrWhiteSpace(TalkSessionKey) ? "agent:main:main" : TalkSessionKey.Trim();
             MaximumCameraClipSeconds = Math.Clamp(MaximumCameraClipSeconds, 1, 60);
             MaximumScreenRecordSeconds = Math.Clamp(MaximumScreenRecordSeconds, 1, 120);

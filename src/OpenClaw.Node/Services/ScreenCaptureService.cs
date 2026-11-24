@@ -86,8 +86,8 @@ namespace OpenClaw.Node.Services
                     var screens = Forms.Screen.AllScreens;
                     if (screens.Length == 0) return string.Empty;
                     
-                    var safeIndex = Math.Clamp(screenIndex, 0, screens.Length - 1);
-                    var screen = screens[safeIndex];
+                    if (screenIndex < 0 || screenIndex >= screens.Length) throw new InvalidOperationException("INVALID_REQUEST: screenIndex does not identify a connected display");
+                    var screen = screens[screenIndex];
 
                     using var bitmap = new Bitmap(screen.Bounds.Width, screen.Bounds.Height);
                     using (var g = Graphics.FromImage(bitmap))
@@ -120,8 +120,8 @@ namespace OpenClaw.Node.Services
                 var screens = Forms.Screen.AllScreens;
                 if (screens.Length == 0) return (Array.Empty<byte>(), 0, 0);
 
-                var safeIndex = Math.Clamp(screenIndex, 0, screens.Length - 1);
-                var screen = screens[safeIndex];
+                if (screenIndex < 0 || screenIndex >= screens.Length) throw new InvalidOperationException("INVALID_REQUEST: screenIndex does not identify a connected display");
+                var screen = screens[screenIndex];
 
                 using var bitmap = new Bitmap(screen.Bounds.Width, screen.Bounds.Height);
                 using (var g = Graphics.FromImage(bitmap))
@@ -297,9 +297,10 @@ namespace OpenClaw.Node.Services
             var displays = Recorder.GetDisplays();
             if (displays != null && displays.Count > 0)
             {
-                var safeIndex = Math.Clamp(screenIndex, 0, displays.Count - 1);
+                if (screenIndex < 0 || screenIndex >= displays.Count)
+                    throw new InvalidOperationException("INVALID_REQUEST: screenIndex does not identify a connected display");
                 options.SourceOptions = new SourceOptions();
-                options.SourceOptions.RecordingSources.Add(new DisplayRecordingSource(displays[safeIndex].DeviceName));
+                options.SourceOptions.RecordingSources.Add(new DisplayRecordingSource(displays[screenIndex].DeviceName));
             }
             else
             {

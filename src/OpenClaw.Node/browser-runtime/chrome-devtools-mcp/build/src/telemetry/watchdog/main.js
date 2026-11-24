@@ -6,7 +6,7 @@
 import process from 'node:process';
 import readline from 'node:readline';
 import { parseArgs } from 'node:util';
-import { logger, flushLogs, saveLogsToFile } from '../../logger.js';
+import { logger, flushLogs, saveLogsToFile } from '../../utils/logger.js';
 import { WatchdogMessageType } from '../types.js';
 import { ClearcutSender } from './ClearcutSender.js';
 function parseWatchdogArgs() {
@@ -65,7 +65,7 @@ function main() {
             process.exit(code);
         });
     };
-    logger('Watchdog started', JSON.stringify({
+    logger?.('Watchdog started', JSON.stringify({
         pid: process.pid,
         parentPid,
         version: appVersion,
@@ -73,7 +73,7 @@ function main() {
     }, null, 2));
     const sender = new ClearcutSender({
         appVersion,
-        osType: osType,
+        osType,
         clearcutEndpoint,
         forceFlushIntervalMs: clearcutForceFlushIntervalMs,
         includePidHeader: clearcutIncludePidHeader,
@@ -84,15 +84,15 @@ function main() {
             return;
         }
         isShuttingDown = true;
-        logger(`Parent death detected (${reason}). Sending shutdown event...`);
+        logger?.(`Parent death detected (${reason}). Sending shutdown event...`);
         sender
             .sendShutdownEvent()
             .then(() => {
-            logger('Shutdown event sent. Exiting.');
+            logger?.('Shutdown event sent. Exiting.');
             exit(0);
         })
             .catch(err => {
-            logger('Failed to send shutdown event', err);
+            logger?.('Failed to send shutdown event', err);
             exit(1);
         });
     }
@@ -114,7 +114,7 @@ function main() {
             }
         }
         catch (err) {
-            logger('Failed to parse IPC message', err);
+            logger?.('Failed to parse IPC message', err);
         }
     });
 }
@@ -125,3 +125,4 @@ catch (err) {
     console.error('Watchdog fatal error:', err);
     process.exit(1);
 }
+//# sourceMappingURL=main.js.map

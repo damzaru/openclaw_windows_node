@@ -30,7 +30,7 @@ namespace OpenClaw.Node.Protocol
     /// Ordered Gateway protocol session with device authentication, correlated
     /// requests, bounded frames, reconnect jitter, and cancellable node invokes.
     /// </summary>
-    public sealed class GatewayConnection : IDisposable, IPluginSurfaceClient
+    public sealed class GatewayConnection : IDisposable, IPluginSurfaceClient, IGatewayStreamClient
     {
         private sealed class ActiveInvoke : IDisposable
         {
@@ -102,6 +102,7 @@ namespace OpenClaw.Node.Protocol
         private bool _attemptedDeviceTokenRetry;
         private bool _usedStoredTokenAsPrimary;
         private bool _storedTokenAvailable;
+        private string? _attemptedStoredToken;
         private bool _reconnectPausedForAuthFailure;
 
         public GatewayConnection(
@@ -130,10 +131,19 @@ namespace OpenClaw.Node.Protocol
         public event Action? OnConnected;
         public event Action? OnDisconnected;
         public event Action<string>? OnConnectRejected;
+        public event Action<GatewayConnectFailure>? OnConnectFailure;
+        public event Action<Exception>? OnTransportFailure;
         public event Func<BridgeInvokeRequest, Task<BridgeInvokeResponse>>? OnNodeInvoke;
         public event Func<NodeInvokeContext, Task<BridgeInvokeResponse>>? OnNodeInvokeContext;
 
         public bool IsConnected => Volatile.Read(ref _connected) == 1;
+        public string? ServerVersion { get; private set; }
+        internal static string? ReadServerVersion(JsonElement? server)
+            => server is JsonElement value && value.ValueKind == JsonValueKind.Object && value.TryGetProperty("version", out var version) &&
+                version.ValueKind == JsonValueKind.String && version.GetString() is string text &&
+                System.Text.RegularExpressions.Regex.IsMatch(text, @"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,79}$") ? text : null;
+        public Uri GatewayUri => _serverUri;
+        public ClientWebSocket CreateStreamSocket() => CreateSocket();
 
         public string? GetPluginSurfaceUrl(string surface)
         {
@@ -155,7 +165,7 @@ namespace OpenClaw.Node.Protocol
                 foreach (var item in result.PluginSurfaceUrls)
                 {
                     if (!string.IsNullOrWhiteSpace(item.Key) && !string.IsNullOrWhiteSpace(item.Value))
-                        _pluginSurfaceUrls[item.Key] = item.Value.Trim();
+                        _pluginSurfaceUrls[item.Key] = NormalizeSurfaceUrl(item.Value, _serverUri);
                 }
             }
             return GetPluginSurfaceUrl(key);
@@ -198,7 +208,8 @@ namespace OpenClaw.Node.Protocol
                     }
                     catch (Exception ex)
                     {
-                        OnLog?.Invoke($"[Gateway] Disconnected: {ex.Message}");
+                        OnLog?.Invoke($"[Gateway] Disconnected: {DescribeConnectionException(ex)}");
+                        OnTransportFailure?.Invoke(ex);
                     }
 
                     if (_cts.IsCancellationRequested) break;
@@ -227,6 +238,18 @@ namespace OpenClaw.Node.Protocol
                 try { await tickTask.ConfigureAwait(false); }
                 catch (OperationCanceledException) { }
             }
+        }
+
+        internal static string DescribeConnectionException(Exception exception)
+        {
+            var causes = new List<string>();
+            for (Exception? cause = exception; cause != null && causes.Count < 8; cause = cause.InnerException)
+            {
+                var detail = cause is System.Net.Sockets.SocketException socket ? $" (socket={socket.SocketErrorCode})" :
+                    cause is System.Net.Http.HttpRequestException http && http.StatusCode.HasValue ? $" (HTTP={(int)http.StatusCode.Value})" : "";
+                causes.Add(cause.GetType().Name + detail + ": " + cause.Message);
+            }
+            return string.Join(" -> ", causes);
         }
 
         public async Task SendEventAsync(string eventName, object? payload, CancellationToken cancellationToken)
@@ -352,11 +375,18 @@ namespace OpenClaw.Node.Protocol
             var socket = new ClientWebSocket();
             socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
             var expectedFingerprint = NormalizeFingerprint(_options.TlsCertificateSha256);
-            if (expectedFingerprint.Length > 0)
+            socket.Options.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
             {
-                socket.Options.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
-                    ValidatePinnedCertificate(certificate, errors, expectedFingerprint);
-            }
+                var accepted = ValidateServerCertificate(certificate, errors, expectedFingerprint);
+                if (!accepted && certificate != null)
+                {
+                    using var copy = new X509Certificate2(certificate);
+                    var alternativeNames = copy.Extensions.FirstOrDefault(extension => extension.Oid?.Value == "2.5.29.17");
+                    var names = alternativeNames == null ? Array.Empty<string>() : new X509SubjectAlternativeNameExtension(alternativeNames.RawData, false).EnumerateDnsNames().Take(32).ToArray();
+                    OnLog?.Invoke($"[Gateway] TLS certificate rejected: errors={errors} certificateDnsName={copy.GetNameInfo(X509NameType.DnsName, false)} dnsNames={string.Join(",", names)}");
+                }
+                return accepted;
+            };
             return socket;
         }
 
@@ -484,19 +514,20 @@ namespace OpenClaw.Node.Protocol
             _attemptedDeviceTokenRetry = useDeviceTokenRetry;
             _usedStoredTokenAsPrimary = explicitToken == null && cached != null;
             _storedTokenAvailable = cached != null;
+            _attemptedStoredToken = cached?.Token;
             if (useDeviceTokenRetry) _deviceTokenRetryBudgetUsed = true;
 
             var authToken = explicitToken ?? cached?.Token;
             _connectParams.Auth = authToken != null || useDeviceTokenRetry
                 ? new GatewayAuthParams
                 {
-                    Token = authToken,
-                    DeviceToken = useDeviceTokenRetry ? cached?.Token : null,
+                    Token = explicitToken,
+                    DeviceToken = useDeviceTokenRetry || _usedStoredTokenAsPrimary ? cached?.Token : null,
                 }
                 : null;
             var credential = authToken;
 
-            var signedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var signedAt = ExtractChallengeTimestamp(eventFrame.Payload) ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var signaturePayload = _deviceIdentityService.BuildDeviceAuthPayload(
                 _deviceIdentity.DeviceId,
                 client.Id,
@@ -542,12 +573,15 @@ namespace OpenClaw.Node.Protocol
                         _pendingDeviceTokenRetry = true;
                         _retryAfterMs = 0;
                     }
-                    else if ((_attemptedDeviceTokenRetry || _usedStoredTokenAsPrimary) && _deviceIdentity != null)
+                    else if ((_attemptedDeviceTokenRetry || _usedStoredTokenAsPrimary) && _deviceIdentity != null &&
+                             ReadConnectErrorDetailCode(response.Error) == "AUTH_DEVICE_TOKEN_MISMATCH")
                     {
-                        _deviceTokenStore.Clear(_serverUri, _deviceIdentity.DeviceId, _connectParams.Role);
+                        _deviceTokenStore.Clear(_serverUri, _deviceIdentity.DeviceId, _connectParams.Role, _attemptedStoredToken);
                     }
                     if (!retryWithDeviceToken && ShouldPauseAfterConnectError(response.Error))
                         _reconnectPausedForAuthFailure = true;
+                    if (response.Error != null)
+                        OnConnectFailure?.Invoke(new(response.Error, _reconnectPausedForAuthFailure, retryWithDeviceToken));
                     var message = response.Error == null
                         ? "Gateway rejected the connection"
                         : $"{response.Error.Code}: {response.Error.Message}";
@@ -573,6 +607,7 @@ namespace OpenClaw.Node.Protocol
                     return;
                 }
                 ApplyHelloPolicy(hello);
+                ServerVersion = ReadServerVersion(hello.Server);
                 PersistDeviceTokens(hello);
                 _pluginSurfaceUrls.Clear();
                 if (hello?.PluginSurfaceUrls != null)
@@ -580,7 +615,7 @@ namespace OpenClaw.Node.Protocol
                     foreach (var item in hello.PluginSurfaceUrls)
                     {
                         if (!string.IsNullOrWhiteSpace(item.Key) && !string.IsNullOrWhiteSpace(item.Value))
-                            _pluginSurfaceUrls[item.Key] = item.Value.Trim();
+                            _pluginSurfaceUrls[item.Key] = NormalizeSurfaceUrl(item.Value, _serverUri);
                     }
                 }
                 _reconnectAttempt = 0;
@@ -646,7 +681,7 @@ namespace OpenClaw.Node.Protocol
             }
             request.NodeId = string.IsNullOrWhiteSpace(request.NodeId) ? ResolveNodeId() : request.NodeId.Trim();
 
-            if (!string.IsNullOrWhiteSpace(request.IdempotencyKey))
+            if (!string.IsNullOrWhiteSpace(request.IdempotencyKey) && !BypassesIdempotencyReceipts(request))
             {
                 PruneIdempotencyReceipts();
                 var receiptKey = IdempotencyReceiptKey(request.NodeId, request.IdempotencyKey!);
@@ -661,8 +696,8 @@ namespace OpenClaw.Node.Protocol
                 }
             }
 
-            var timeoutMs = Math.Clamp(request.TimeoutMs ?? Constants.DefaultRequestTimeoutMs, 100, 10 * 60 * 1000);
-            var timeoutCts = new CancellationTokenSource(timeoutMs);
+            var timeoutMs = ResolveInvokeTimeoutMs(request.TimeoutMs);
+            var timeoutCts = timeoutMs.HasValue ? new CancellationTokenSource(timeoutMs.Value) : new CancellationTokenSource();
             var handlerCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, timeoutCts.Token);
             var active = new ActiveInvoke
             {
@@ -680,6 +715,39 @@ namespace OpenClaw.Node.Protocol
 
             OnLog?.Invoke($"[Gateway] Executing node.invoke.request id={request.Id} command={request.Command}");
             _ = ExecuteNodeInvokeAsync(active);
+        }
+
+        internal static int? ResolveInvokeTimeoutMs(int? requested)
+            => requested == 0 ? null : Math.Clamp(requested ?? Constants.DefaultRequestTimeoutMs, 100, 10 * 60 * 1000);
+
+        internal static bool UsesFramedFileTransfer(BridgeInvokeRequest request)
+        {
+            if (request.Command is not ("file.fetch" or "file.create")) return false;
+            try
+            {
+                using var json = JsonDocument.Parse(request.ParamsJSON ?? "{}");
+                var p = json.RootElement;
+                if (p.ValueKind != JsonValueKind.Object) return false;
+                if (p.TryGetProperty("preflightOnly", out var preflight) && preflight.ValueKind == JsonValueKind.True) return false;
+                return request.Command == "file.create" || (p.TryGetProperty("transport", out var transport) && transport.ValueKind == JsonValueKind.String && transport.GetString() == "binary");
+            }
+            catch (JsonException) { return false; }
+        }
+
+        internal static bool BypassesIdempotencyReceipts(BridgeInvokeRequest request)
+        {
+            if (UsesFramedFileTransfer(request)) return true;
+            if (request.Command is not ("file.stat" or "file.fetch" or "dir.list" or "dir.fetch" or "file.write" or "file.create")) return false;
+            try
+            {
+                using var json = JsonDocument.Parse(request.ParamsJSON ?? "{}");
+                var p = json.RootElement;
+                // Gateway authorization probes and the bound operation share a key.
+                // Every probe must inspect current identity, not replay an old binding
+                // or occupy the mutation's terminal receipt slot.
+                return p.ValueKind == JsonValueKind.Object && p.TryGetProperty("preflightOnly", out var preflight) && preflight.ValueKind == JsonValueKind.True;
+            }
+            catch (JsonException) { return false; }
         }
 
         private async Task ExecuteNodeInvokeAsync(ActiveInvoke active)
@@ -819,6 +887,7 @@ namespace OpenClaw.Node.Protocol
                 {
                     code = JsonSerializer.SerializeToElement(response.Error.Code, JsonOptions).GetString(),
                     message = response.Error.Message,
+                    details = response.Error.Details,
                 };
             return new
             {
@@ -926,7 +995,7 @@ namespace OpenClaw.Node.Protocol
             var advertisedMax = hello?.Policy?.MaxPayload ?? hello?.Policy?.MaxBufferedBytes;
             if (advertisedMax is > 0)
             {
-                _maximumFrameBytes = Math.Max(64 * 1024, Math.Min(_options.MaximumFrameBytes, advertisedMax.Value));
+                _maximumFrameBytes = Math.Min(_options.MaximumFrameBytes, advertisedMax.Value);
             }
         }
 
@@ -935,12 +1004,15 @@ namespace OpenClaw.Node.Protocol
             if (_deviceIdentity == null || hello?.Auth == null) return;
             if (!string.IsNullOrWhiteSpace(hello.Auth.DeviceToken))
             {
+                var tokenRole = hello.Auth.Role ?? _connectParams.Role;
+                if (!string.Equals(tokenRole, _connectParams.Role, StringComparison.Ordinal)) return;
+                var cached = _deviceTokenStore.Load(_serverUri, _deviceIdentity.DeviceId, tokenRole);
                 _deviceTokenStore.Save(
                     _serverUri,
                     _deviceIdentity.DeviceId,
-                    hello.Auth.Role ?? _connectParams.Role,
+                    tokenRole,
                     hello.Auth.DeviceToken,
-                    hello.Auth.Scopes);
+                    cached?.Token == hello.Auth.DeviceToken ? cached.Scopes : hello.Auth.Scopes);
             }
 
             // Additional role tokens are bootstrap handoffs. This companion
@@ -1057,8 +1129,9 @@ namespace OpenClaw.Node.Protocol
             if (string.Equals(detailCode, "AUTH_TOKEN_MISMATCH", StringComparison.Ordinal)) return true;
             return error?.Details is JsonElement details &&
                    details.ValueKind == JsonValueKind.Object &&
-                   details.TryGetProperty("canRetryWithDeviceToken", out var retry) &&
-                   retry.ValueKind == JsonValueKind.True;
+                   ((details.TryGetProperty("canRetryWithDeviceToken", out var retry) && retry.ValueKind == JsonValueKind.True) ||
+                    (details.TryGetProperty("recommendedNextStep", out var next) && next.ValueKind == JsonValueKind.String &&
+                     next.GetString() == "retry_with_device_token"));
         }
 
         internal static bool ShouldPauseAfterConnectError(GatewayErrorShape? error)
@@ -1096,6 +1169,13 @@ namespace OpenClaw.Node.Protocol
                 "AUTH_RATE_LIMITED" or
                 "AUTH_DEVICE_TOKEN_MISMATCH" or
                 "AUTH_SCOPE_MISMATCH" or
+                "AUTH_IDENTITY_HEADER_REQUIRED" or
+                "AUTH_VERIFIED_USER_REQUIRED" or
+                "AUTHENTICATED_PROFILE_UNAVAILABLE" or
+                "OPERATOR_ACCESS_DENIED" or
+                "CONTROL_UI_BUILD_MISMATCH" or
+                "PAIRING_REJECTED" or
+                "PAIRING_EXPIRED" or
                 "CONTROL_UI_DEVICE_IDENTITY_REQUIRED" or
                 "DEVICE_IDENTITY_REQUIRED" or
                 "PROTOCOL_MISMATCH" or
@@ -1108,6 +1188,32 @@ namespace OpenClaw.Node.Protocol
             return details.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String
                 ? code.GetString()?.Trim()
                 : null;
+        }
+
+        private static long? ExtractChallengeTimestamp(object? payload)
+        {
+            var value = payload is JsonElement json ? json : JsonSerializer.SerializeToElement(payload);
+            return value.ValueKind == JsonValueKind.Object && value.TryGetProperty("ts", out var ts) &&
+                   ts.ValueKind == JsonValueKind.Number && ts.TryGetInt64(out var timestamp) && timestamp >= 0 ? timestamp : null;
+        }
+
+        internal static string NormalizeSurfaceUrl(string value, Uri gateway)
+        {
+            if (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out var surface) || surface.Scheme is not ("http" or "https") || !string.IsNullOrEmpty(surface.UserInfo))
+                throw new InvalidOperationException("Gateway returned an invalid plugin surface URL");
+            var builder = new UriBuilder(surface);
+            if (surface.IsLoopback && !gateway.IsLoopback)
+            {
+                builder.Host = gateway.Host;
+                builder.Scheme = gateway.Scheme == "wss" ? "https" : "http";
+                builder.Port = gateway.Port;
+            }
+            else if (!surface.IsLoopback && gateway.Scheme == "wss")
+            {
+                builder.Scheme = "https";
+                if (surface.IsDefaultPort) builder.Port = gateway.Port;
+            }
+            return builder.Uri.AbsoluteUri;
         }
 
         private static string NormalizeFingerprint(string? value)
@@ -1123,10 +1229,14 @@ namespace OpenClaw.Node.Protocol
             return builder.ToString();
         }
 
+        internal static bool ValidateServerCertificate(X509Certificate? certificate, SslPolicyErrors errors, string expectedFingerprint)
+            => expectedFingerprint.Length > 0 ? ValidatePinnedCertificate(certificate, errors, expectedFingerprint)
+                : certificate != null && errors == SslPolicyErrors.None;
+
         private static bool ValidatePinnedCertificate(X509Certificate? certificate, SslPolicyErrors errors, string expectedFingerprint)
         {
             if (certificate == null || errors.HasFlag(SslPolicyErrors.RemoteCertificateNotAvailable)) return false;
-            using var certificate2 = certificate as X509Certificate2 ?? new X509Certificate2(certificate);
+            using var certificate2 = new X509Certificate2(certificate);
             var actual = Convert.ToHexString(certificate2.GetCertHash(HashAlgorithmName.SHA256));
             return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(actual), Encoding.ASCII.GetBytes(expectedFingerprint));
         }
@@ -1172,13 +1282,15 @@ namespace OpenClaw.Node.Protocol
 
         private static string InvokeDigest(BridgeInvokeRequest request)
         {
-            var text = request.Command + "\0" + (request.ParamsJSON ?? string.Empty);
+            var text = request.Command + "\0" + (request.SessionKey ?? string.Empty) + "\0" + (request.ParamsJSON ?? string.Empty);
             return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
         }
 
         private void StoreIdempotencyReceipt(BridgeInvokeRequest request, BridgeInvokeResponse response)
         {
-            if (string.IsNullOrWhiteSpace(request.IdempotencyKey)) return;
+            // Neither a fresh authorization probe nor duplex bytes/readiness can be
+            // replayed from a terminal receipt. Ordinary bound operations still cache.
+            if (string.IsNullOrWhiteSpace(request.IdempotencyKey) || BypassesIdempotencyReceipts(request)) return;
             _idempotencyReceipts[IdempotencyReceiptKey(request.NodeId, request.IdempotencyKey!)] =
                 new IdempotencyReceipt(InvokeDigest(request), CloneResponse(response, response.Id, response.NodeId ?? request.NodeId), DateTimeOffset.UtcNow.AddMinutes(10));
             PruneIdempotencyReceipts();

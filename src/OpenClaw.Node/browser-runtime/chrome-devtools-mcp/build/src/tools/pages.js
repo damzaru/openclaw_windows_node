@@ -3,25 +3,31 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
-import { logger } from '../logger.js';
 import { zod } from '../third_party/index.js';
+import { logger } from '../utils/logger.js';
+import { validateUrl } from '../utils/url.js';
 import { ToolCategory } from './categories.js';
 import { CLOSE_PAGE_ERROR, definePageTool, defineTool, timeoutSchema, } from './ToolDefinition.js';
-export const listPages = definePageTool(args => {
+export const listPages = defineTool((args) => {
     return {
         name: 'list_pages',
-        description: `Get a list of pages ${args?.categoryExtensions ? 'including extension service workers' : ''} open in the browser.`,
+        description: `Get a list of pages${args?.categoryExtensions ? ' including extension service workers' : ''} open in the browser.`,
         annotations: {
             category: ToolCategory.NAVIGATION,
             readOnlyHint: true,
         },
         schema: {},
+        blockedByDialog: false,
+        concurrency: 'exclusive',
+        verifyFilesSchema: {},
         handler: async (_request, response) => {
             response.setIncludePages(true);
+            response.setListThirdPartyDeveloperTools();
+            response.setListWebMcpTools();
         },
     };
 });
-export const selectPage = defineTool({
+export const selectPage = defineTool((args) => ({
     name: 'select_page',
     description: `Select a page as a context for future tool calls.`,
     annotations: {
@@ -31,22 +37,28 @@ export const selectPage = defineTool({
     schema: {
         pageId: zod
             .number()
-            .describe(`The ID of the page to select. Call ${listPages().name} to get available pages.`),
+            .describe(`The ID of the page to select. Call ${listPages(args).name} to get available pages.`),
         bringToFront: zod
             .boolean()
             .optional()
             .describe('Whether to focus the page and bring it to the top.'),
     },
+    blockedByDialog: false,
+    concurrency: 'exclusive',
+    verifyFilesSchema: {},
     handler: async (request, response, context) => {
         const page = context.getPageById(request.params.pageId);
+        await page.init({ emulateFocus: true });
         context.selectPage(page);
         response.setIncludePages(true);
+        response.setListThirdPartyDeveloperTools();
+        response.setListWebMcpTools();
         if (request.params.bringToFront) {
             await page.pptrPage.bringToFront();
         }
     },
-});
-export const closePage = defineTool({
+}));
+export const closePage = defineTool(() => ({
     name: 'close_page',
     description: `Closes the page by its index. The last open page cannot be closed.`,
     annotations: {
@@ -58,6 +70,9 @@ export const closePage = defineTool({
             .number()
             .describe('The ID of the page to close. Call list_pages to list pages.'),
     },
+    blockedByDialog: false,
+    concurrency: 'exclusive',
+    verifyFilesSchema: {},
     handler: async (request, response, context) => {
         try {
             await context.closePage(request.params.pageId);
@@ -71,171 +86,229 @@ export const closePage = defineTool({
             }
         }
         response.setIncludePages(true);
+        response.setListThirdPartyDeveloperTools();
     },
-});
-export const newPage = defineTool({
-    name: 'new_page',
-    description: `Open a new tab and load a URL. Use project URL if not specified otherwise.`,
-    annotations: {
-        category: ToolCategory.NAVIGATION,
-        readOnlyHint: false,
-    },
-    schema: {
-        url: zod.string().describe('URL to load in a new page.'),
-        background: zod
-            .boolean()
-            .optional()
-            .describe('Whether to open the page in the background without bringing it to the front. Default is false (foreground).'),
-        isolatedContext: zod
-            .string()
-            .optional()
-            .describe('If specified, the page is created in an isolated browser context with the given name. ' +
-            'Pages in the same browser context share cookies and storage. ' +
-            'Pages in different browser contexts are fully isolated.'),
-        ...timeoutSchema,
-    },
-    handler: async (request, response, context) => {
-        const page = await context.newPage(request.params.background, request.params.isolatedContext);
-        await context.waitForEventsAfterAction(async () => {
-            await page.pptrPage.goto(request.params.url, {
-                timeout: request.params.timeout,
+}));
+export const newPage = defineTool((args) => {
+    return {
+        name: 'new_page',
+        description: `Open a new tab and load a URL. Use project URL if not specified otherwise.`,
+        annotations: {
+            category: ToolCategory.NAVIGATION,
+            readOnlyHint: false,
+        },
+        schema: {
+            url: zod.string().describe('URL to load in a new page.'),
+            background: zod
+                .boolean()
+                .optional()
+                .describe('Whether to open the page in the background without bringing it to the front. Default is false (foreground).'),
+            isolatedContext: zod
+                .string()
+                .optional()
+                .describe('If specified, the page is created in an isolated browser context with the given name. ' +
+                'Pages in the same browser context share cookies and storage. ' +
+                'Pages in different browser contexts are fully isolated (useful for clean-slate testing of cookies and authentication).'),
+            ...timeoutSchema,
+        },
+        blockedByDialog: false,
+        concurrency: 'exclusive',
+        verifyFilesSchema: {},
+        handler: async (request, response, context) => {
+            validateUrl(request.params.url, {
+                javascriptEvaluation: args?.javascriptEvaluation,
+                categoryExtensions: args?.categoryExtensions,
+                fileNavigations: args?.fileNavigations,
             });
-        }, { timeout: request.params.timeout });
-        response.setIncludePages(true);
-    },
-});
-export const navigatePage = definePageTool({
-    name: 'navigate_page',
-    description: `Go to a URL, or back, forward, or reload. Use project URL if not specified otherwise.`,
-    annotations: {
-        category: ToolCategory.NAVIGATION,
-        readOnlyHint: false,
-    },
-    schema: {
-        type: zod
-            .enum(['url', 'back', 'forward', 'reload'])
-            .optional()
-            .describe('Navigate the page by URL, back or forward in history, or reload.'),
-        url: zod.string().optional().describe('Target URL (only type=url)'),
-        ignoreCache: zod
-            .boolean()
-            .optional()
-            .describe('Whether to ignore cache on reload.'),
-        handleBeforeUnload: zod
-            .enum(['accept', 'decline'])
-            .optional()
-            .describe('Whether to auto accept or beforeunload dialogs triggered by this navigation. Default is accept.'),
-        initScript: zod
-            .string()
-            .optional()
-            .describe('A JavaScript script to be executed on each new document before any other scripts for the next navigation.'),
-        ...timeoutSchema,
-    },
-    handler: async (request, response, context) => {
-        const page = request.page;
-        const options = {
-            timeout: request.params.timeout,
-        };
-        if (!request.params.type && !request.params.url) {
-            throw new Error('Either URL or a type is required.');
-        }
-        if (!request.params.type) {
-            request.params.type = 'url';
-        }
-        const handleBeforeUnload = request.params.handleBeforeUnload ?? 'accept';
-        const dialogHandler = (dialog) => {
-            if (dialog.type() === 'beforeunload') {
-                if (handleBeforeUnload === 'accept') {
-                    response.appendResponseLine(`Accepted a beforeunload dialog.`);
-                    void dialog.accept();
+            let previousPage;
+            try {
+                previousPage = context.getSelectedMcpPage();
+            }
+            catch {
+                // Nothing is selected, so there is no selection to restore on failure.
+            }
+            const page = await context.newPage(request.params.background, request.params.isolatedContext);
+            try {
+                await page.waitForEventsAfterAction(async () => {
+                    await page.pptrPage.goto(request.params.url, {
+                        timeout: request.params.timeout,
+                    });
+                }, { timeout: request.params.timeout });
+            }
+            catch (error) {
+                // A dialog-blocked load stays open for handle_dialog. Otherwise cleanup is
+                // best-effort: the navigation error is always what gets rethrown.
+                if (page.getDialog()) {
+                    response.setIncludePages(true);
                 }
                 else {
-                    response.appendResponseLine(`Declined a beforeunload dialog.`);
-                    void dialog.dismiss();
+                    try {
+                        if (previousPage && !previousPage.isClosed()) {
+                            context.selectPage(previousPage);
+                        }
+                    }
+                    catch {
+                        // Keep the new tab selected.
+                    }
+                    try {
+                        await context.closePage(page.id);
+                    }
+                    catch {
+                        // The tab survived, so list pages to tell the caller its pageId.
+                        response.setIncludePages(true);
+                    }
                 }
-                // We are not going to report the dialog like regular dialogs.
-                page.clearDialog();
+                throw error;
             }
-        };
-        let initScriptId;
-        if (request.params.initScript) {
-            const { identifier } = await page.pptrPage.evaluateOnNewDocument(request.params.initScript);
-            initScriptId = identifier;
-        }
-        page.pptrPage.on('dialog', dialogHandler);
-        try {
-            await context.waitForEventsAfterAction(async () => {
-                switch (request.params.type) {
-                    case 'url':
-                        if (!request.params.url) {
-                            throw new Error('A URL is required for navigation of type=url.');
-                        }
-                        try {
-                            await page.pptrPage.goto(request.params.url, options);
-                            response.appendResponseLine(`Successfully navigated to ${request.params.url}.`);
-                        }
-                        catch (error) {
-                            response.appendResponseLine(`Unable to navigate in the  selected page: ${error.message}.`);
-                        }
-                        break;
-                    case 'back':
-                        try {
-                            await page.pptrPage.goBack(options);
-                            response.appendResponseLine(`Successfully navigated back to ${page.pptrPage.url()}.`);
-                        }
-                        catch (error) {
-                            response.appendResponseLine(`Unable to navigate back in the selected page: ${error.message}.`);
-                        }
-                        break;
-                    case 'forward':
-                        try {
-                            await page.pptrPage.goForward(options);
-                            response.appendResponseLine(`Successfully navigated forward to ${page.pptrPage.url()}.`);
-                        }
-                        catch (error) {
-                            response.appendResponseLine(`Unable to navigate forward in the selected page: ${error.message}.`);
-                        }
-                        break;
-                    case 'reload':
-                        try {
-                            await page.pptrPage.reload({
-                                ...options,
-                                ignoreCache: request.params.ignoreCache,
-                            });
-                            response.appendResponseLine(`Successfully reloaded the page.`);
-                        }
-                        catch (error) {
-                            response.appendResponseLine(`Unable to reload the selected page: ${error.message}.`);
-                        }
-                        break;
+            response.setIncludePages(true);
+            response.setListThirdPartyDeveloperTools();
+        },
+    };
+});
+export const navigatePage = definePageTool((args) => {
+    return {
+        name: 'navigate_page',
+        description: `Go to a URL, or back, forward, or reload. Use project URL if not specified otherwise.`,
+        annotations: {
+            category: ToolCategory.NAVIGATION,
+            readOnlyHint: false,
+        },
+        schema: {
+            type: zod
+                .enum(['url', 'back', 'forward', 'reload'])
+                .optional()
+                .describe('Navigate the page by URL, back or forward in history, or reload.'),
+            url: zod.string().optional().describe('Target URL (only type=url)'),
+            ignoreCache: zod
+                .boolean()
+                .optional()
+                .describe('Whether to ignore cache on reload.'),
+            handleBeforeUnload: zod
+                .enum(['accept', 'dismiss'])
+                .optional()
+                .describe('Whether to auto accept or beforeunload dialogs triggered by this navigation. Default is accept.'),
+            ...(args?.javascriptEvaluation !== false
+                ? {
+                    initScript: zod
+                        .string()
+                        .optional()
+                        .describe('A JavaScript script to be executed on each new document before any other scripts for the next navigation.'),
                 }
-            }, { timeout: request.params.timeout });
-        }
-        finally {
-            page.pptrPage.off('dialog', dialogHandler);
-            if (initScriptId) {
-                await page.pptrPage
-                    .removeScriptToEvaluateOnNewDocument(initScriptId)
-                    .catch(error => {
-                    logger(`Failed to remove init script`, error);
+                : {}),
+            ...timeoutSchema,
+        },
+        blockedByDialog: false,
+        concurrency: 'page',
+        verifyFilesSchema: {},
+        handler: async (request, response) => {
+            const page = request.page;
+            const options = {
+                timeout: request.params.timeout,
+            };
+            if (!request.params.type && !request.params.url) {
+                throw new Error('Either URL or a type is required.');
+            }
+            if (!request.params.type) {
+                request.params.type = 'url';
+            }
+            if (request.params.url) {
+                validateUrl(request.params.url, {
+                    javascriptEvaluation: args?.javascriptEvaluation,
+                    categoryExtensions: args?.categoryExtensions,
+                    fileNavigations: args?.fileNavigations,
                 });
             }
-        }
-        response.setIncludePages(true);
-    },
+            let initScriptId;
+            if (request.params.initScript) {
+                const { identifier } = await page.pptrPage.evaluateOnNewDocument(request.params.initScript);
+                initScriptId = identifier;
+            }
+            try {
+                const action = request.params.handleBeforeUnload ?? 'accept';
+                const result = await page.waitForEventsAfterAction(async () => {
+                    switch (request.params.type) {
+                        case 'url':
+                            if (!request.params.url) {
+                                throw new Error('A URL is required for navigation of type=url.');
+                            }
+                            try {
+                                await page.pptrPage.goto(request.params.url, options);
+                                response.appendResponseLine(`Successfully navigated to ${request.params.url}.`);
+                            }
+                            catch (error) {
+                                response.appendResponseLine(`Unable to navigate in the selected page: ${error.message}.`);
+                            }
+                            break;
+                        case 'back':
+                            try {
+                                await page.pptrPage.goBack(options);
+                                response.appendResponseLine(`Successfully navigated back to ${page.pptrPage.url()}.`);
+                            }
+                            catch (error) {
+                                response.appendResponseLine(`Unable to navigate back in the selected page: ${error.message}.`);
+                            }
+                            break;
+                        case 'forward':
+                            try {
+                                await page.pptrPage.goForward(options);
+                                response.appendResponseLine(`Successfully navigated forward to ${page.pptrPage.url()}.`);
+                            }
+                            catch (error) {
+                                response.appendResponseLine(`Unable to navigate forward in the selected page: ${error.message}.`);
+                            }
+                            break;
+                        case 'reload':
+                            try {
+                                await page.pptrPage.reload({
+                                    ...options,
+                                    ignoreCache: request.params.ignoreCache,
+                                });
+                                response.appendResponseLine(`Successfully reloaded the page.`);
+                            }
+                            catch (error) {
+                                response.appendResponseLine(`Unable to reload the selected page: ${error.message}.`);
+                            }
+                            break;
+                    }
+                }, {
+                    timeout: request.params.timeout,
+                    handleDialog: { beforeunload: action },
+                });
+                if (result.dialogHandled) {
+                    response.appendResponseLine(`${action === 'dismiss' ? 'Dismissed' : 'Accepted'} a beforeunload dialog.`);
+                    page.clearDialog();
+                }
+            }
+            finally {
+                if (initScriptId) {
+                    await page.pptrPage
+                        .removeScriptToEvaluateOnNewDocument(initScriptId)
+                        .catch(error => {
+                        logger?.(`Failed to remove init script`, error);
+                    });
+                }
+            }
+            response.setIncludePages(true);
+            response.setListThirdPartyDeveloperTools();
+            response.setListWebMcpTools();
+        },
+    };
 });
-export const resizePage = definePageTool({
+export const resizePage = definePageTool(() => ({
     name: 'resize_page',
-    description: `Resizes the selected page's window so that the page has specified dimension`,
+    description: `Resizes the page's window so that the page has specified dimension`,
     annotations: {
         category: ToolCategory.EMULATION,
         readOnlyHint: false,
     },
     schema: {
-        width: zod.number().describe('Page width'),
-        height: zod.number().describe('Page height'),
+        width: zod.number().int().positive().describe('Page width'),
+        height: zod.number().int().positive().describe('Page height'),
     },
-    handler: async (request, response, _context) => {
+    blockedByDialog: false,
+    concurrency: 'exclusive',
+    verifyFilesSchema: {},
+    handler: async (request, response) => {
         const page = request.page;
         try {
             const browser = page.pptrPage.browser();
@@ -259,8 +332,8 @@ export const resizePage = definePageTool({
         });
         response.setIncludePages(true);
     },
-});
-export const handleDialog = definePageTool({
+}));
+export const handleDialog = definePageTool(() => ({
     name: 'handle_dialog',
     description: `If a browser dialog was opened, use this command to handle it`,
     annotations: {
@@ -276,7 +349,10 @@ export const handleDialog = definePageTool({
             .optional()
             .describe('Optional prompt text to enter into the dialog.'),
     },
-    handler: async (request, response, _context) => {
+    blockedByDialog: false,
+    concurrency: 'page',
+    verifyFilesSchema: {},
+    handler: async (request, response) => {
         const page = request.page;
         const dialog = page.getDialog();
         if (!dialog) {
@@ -289,7 +365,7 @@ export const handleDialog = definePageTool({
                 }
                 catch (err) {
                     // Likely already handled by the user outside of MCP.
-                    logger(err);
+                    logger?.(err);
                 }
                 response.appendResponseLine('Successfully accepted the dialog');
                 break;
@@ -300,7 +376,7 @@ export const handleDialog = definePageTool({
                 }
                 catch (err) {
                     // Likely already handled.
-                    logger(err);
+                    logger?.(err);
                 }
                 response.appendResponseLine('Successfully dismissed the dialog');
                 break;
@@ -309,8 +385,8 @@ export const handleDialog = definePageTool({
         page.clearDialog();
         response.setIncludePages(true);
     },
-});
-export const getTabId = definePageTool({
+}));
+export const getTabId = definePageTool(() => ({
     name: 'get_tab_id',
     description: `Get the tab ID of the page`,
     annotations: {
@@ -318,14 +394,15 @@ export const getTabId = definePageTool({
         readOnlyHint: true,
         conditions: ['experimentalInteropTools'],
     },
-    schema: {
-        pageId: zod
-            .number()
-            .describe(`The ID of the page to get the tab ID for. Call ${listPages().name} to get available pages.`),
-    },
-    handler: async (request, response, context) => {
-        const page = context.getPageById(request.params.pageId);
+    schema: {},
+    blockedByDialog: false,
+    concurrency: 'page',
+    verifyFilesSchema: {},
+    handler: async (request, response) => {
+        const page = request.page;
         const tabId = page.pptrPage._tabId;
         response.setTabId(tabId);
+        response.appendResponseLine(`Tab ID: ${tabId}`);
     },
-});
+}));
+//# sourceMappingURL=pages.js.map

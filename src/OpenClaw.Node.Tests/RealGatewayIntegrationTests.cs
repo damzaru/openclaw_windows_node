@@ -767,12 +767,8 @@ namespace OpenClaw.Node.Tests
 
         private static (string Url, string Token) LoadGatewayConfig()
         {
-            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".openclaw", "openclaw.json");
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            var gw = doc.RootElement.GetProperty("gateway");
-            var port = gw.GetProperty("port").GetInt32();
-            var token = gw.GetProperty("auth").GetProperty("token").GetString() ?? string.Empty;
-            return ($"ws://127.0.0.1:{port}/", token);
+            var store = new CompanionSettingsStore();
+            return Program.ResolveConnectionSettings(Array.Empty<string>(), store.Load(), store.HasSavedSettings);
         }
 
         private sealed class RealGatewayRpcClient : IDisposable

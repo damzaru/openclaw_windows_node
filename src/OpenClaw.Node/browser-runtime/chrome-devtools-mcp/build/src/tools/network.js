@@ -18,7 +18,6 @@ const FILTERABLE_RESOURCE_TYPES = [
     'fetch',
     'prefetch',
     'eventsource',
-    'websocket',
     'manifest',
     'signedexchange',
     'ping',
@@ -27,9 +26,9 @@ const FILTERABLE_RESOURCE_TYPES = [
     'fedcm',
     'other',
 ];
-export const listNetworkRequests = definePageTool({
+export const listNetworkRequests = definePageTool((args) => ({
     name: 'list_network_requests',
-    description: `List all requests for the currently selected page since the last navigation.`,
+    description: `Lists the most recent requests for the target page since the last navigation.`,
     annotations: {
         category: ToolCategory.NETWORK,
         readOnlyHint: true,
@@ -46,7 +45,7 @@ export const listNetworkRequests = definePageTool({
             .int()
             .min(0)
             .optional()
-            .describe('Page number to return (0-based). When omitted, returns the first page.'),
+            .describe('Page number to return (0-based). When omitted, returns the first page. Ignored unless pageSize is set.'),
         resourceTypes: zod
             .array(zod.enum(FILTERABLE_RESOURCE_TYPES))
             .optional()
@@ -55,13 +54,16 @@ export const listNetworkRequests = definePageTool({
             .boolean()
             .default(false)
             .optional()
-            .describe('Set to true to return the preserved requests over the last 3 navigations.'),
+            .describe(`Set to true to return the preserved requests over the last ${args.maxNavigationSaved} navigations.`),
     },
-    handler: async (request, response, context) => {
-        const data = await context.getDevToolsData(request.page);
+    blockedByDialog: false,
+    concurrency: 'page',
+    verifyFilesSchema: {},
+    handler: async (request, response) => {
+        const data = await request.page.getDevToolsData();
         response.attachDevToolsData(data);
         const reqid = data?.cdpRequestId
-            ? context.resolveCdpRequestId(request.page, data.cdpRequestId)
+            ? request.page.resolveCdpRequestId(data.cdpRequestId)
             : undefined;
         response.setIncludeNetworkRequests(true, {
             pageSize: request.params.pageSize,
@@ -71,10 +73,10 @@ export const listNetworkRequests = definePageTool({
             networkRequestIdInDevToolsUI: reqid,
         });
     },
-});
-export const getNetworkRequest = definePageTool({
+}));
+export const getNetworkRequest = definePageTool(() => ({
     name: 'get_network_request',
-    description: `Gets a network request by an optional reqid, if omitted returns the currently selected request in the DevTools Network panel.`,
+    description: `Gets a network request by an optional reqid, if omitted returns the currently selected request in the DevTools Network panel. Useful for inspecting request headers (including 'Cookie') and response headers (including 'Set-Cookie' and directives).`,
     annotations: {
         category: ToolCategory.NETWORK,
         readOnlyHint: false,
@@ -87,13 +89,19 @@ export const getNetworkRequest = definePageTool({
         requestFilePath: zod
             .string()
             .optional()
-            .describe('The absolute or relative path to save the request body to. If omitted, the body is returned inline.'),
+            .describe('The absolute or relative path to a .network-request file to save the request body to. If omitted, the body is returned inline.'),
         responseFilePath: zod
             .string()
             .optional()
-            .describe('The absolute or relative path to save the response body to. If omitted, the body is returned inline.'),
+            .describe('The absolute or relative path to a .network-response file to save the response body to. If omitted, the body is returned inline.'),
     },
-    handler: async (request, response, context) => {
+    blockedByDialog: true,
+    concurrency: 'page',
+    verifyFilesSchema: {
+        requestFilePath: true,
+        responseFilePath: true,
+    },
+    handler: async (request, response) => {
         if (request.params.reqid) {
             response.attachNetworkRequest(request.params.reqid, {
                 requestFilePath: request.params.requestFilePath,
@@ -101,10 +109,10 @@ export const getNetworkRequest = definePageTool({
             });
         }
         else {
-            const data = await context.getDevToolsData(request.page);
+            const data = await request.page.getDevToolsData();
             response.attachDevToolsData(data);
             const reqid = data?.cdpRequestId
-                ? context.resolveCdpRequestId(request.page, data.cdpRequestId)
+                ? request.page.resolveCdpRequestId(data.cdpRequestId)
                 : undefined;
             if (reqid) {
                 response.attachNetworkRequest(reqid, {
@@ -117,4 +125,5 @@ export const getNetworkRequest = definePageTool({
             }
         }
     },
-});
+}));
+//# sourceMappingURL=network.js.map

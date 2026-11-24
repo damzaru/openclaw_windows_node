@@ -20,15 +20,17 @@ public class ScreenCaptureRoutingTests
             => Task.FromResult((_bytes, 1, 1));
     }
 
-    [Fact]
-    public async Task ScreenSnapshot_ReturnsCurrentGatewayPayloadShape()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ScreenSnapshot_ReturnsCurrentGatewayPayloadShape(bool explicitIndex)
     {
         using var executor = new NodeCommandExecutor(screen: new FakeScreenProvider());
         var response = await executor.ExecuteAsync(new BridgeInvokeRequest
         {
             Id = "snapshot-1",
             Command = "screen.snapshot",
-            ParamsJSON = JsonSerializer.Serialize(new { format = "png", screenIndex = 0 })
+            ParamsJSON = explicitIndex ? "{\"format\":\"png\",\"screenIndex\":0}" : "{\"format\":\"png\"}"
         });
 
         Assert.True(response.Ok);

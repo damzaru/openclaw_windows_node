@@ -8,12 +8,41 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenClaw.Node.Protocol;
+using OpenClaw.Node.Services;
 using Xunit;
 
 namespace OpenClaw.Node.Tests
 {
     public class GatewayConnectionDispatchTests
     {
+        [Fact]
+        public async Task GatewayConnection_PreservesNativePermissionRemediationDetails()
+        {
+            var port = GetFreePort();
+            await using var server = new MockGatewayServer(port);
+            await server.StartAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var connection = new GatewayConnection($"ws://127.0.0.1:{port}/", "test-token", CreateNodeConnectParams());
+            connection.OnNodeInvoke += req => Task.FromResult(new BridgeInvokeResponse
+            {
+                Id = req.Id, Ok = false,
+                Error = new OpenClawNodeError
+                {
+                    Code = OpenClawNodeErrorCode.Unavailable, Message = "Computer control is disabled",
+                    Details = JsonSerializer.SerializeToElement(new { capabilities = new[] { "computer" }, state = "disabled-in-openclaw" }),
+                },
+            });
+            var running = connection.StartAsync(cts.Token);
+            await CompleteConnectAsync(server, cts.Token);
+            await server.SendJsonAsync(new { type = "event", @event = "node.invoke.request", payload = new { id = "permission", nodeId = "node", command = "computer.act", paramsJSON = "{}" } }, cts.Token);
+            using var result = await server.ReceiveJsonAsync(cts.Token);
+            var details = result.RootElement.GetProperty("params").GetProperty("error").GetProperty("details");
+            Assert.Equal("disabled-in-openclaw", details.GetProperty("state").GetString());
+            Assert.Equal("computer", details.GetProperty("capabilities")[0].GetString());
+            cts.Cancel();
+            await running;
+        }
+
         [Fact]
         public async Task GatewayConnection_ShouldHandleConnectAndDispatchStatusRequest()
         {
@@ -67,6 +96,7 @@ namespace OpenClaw.Node.Tests
                 {
                     type = "hello-ok",
                     protocol = Constants.GatewayProtocolVersion,
+                    server = new { version = "2026.11.5" },
                     policy = new { maxPayload = 8 * 1024 * 1024, maxBufferedBytes = 8 * 1024 * 1024, tickIntervalMs = 30000 }
                 }
             }, cts.Token);
@@ -83,6 +113,7 @@ namespace OpenClaw.Node.Tests
             Assert.Equal("res", statusRes.RootElement.GetProperty("type").GetString());
             Assert.Equal("status-1", statusRes.RootElement.GetProperty("id").GetString());
             Assert.True(statusRes.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("2026.11.5", connection.ServerVersion);
 
             cts.Cancel();
             await runTask;
@@ -462,6 +493,221 @@ namespace OpenClaw.Node.Tests
             await runTask;
         }
 
+        [Theory]
+        [InlineData("file.stat")]
+        [InlineData("file.fetch")]
+        [InlineData("dir.list")]
+        [InlineData("dir.fetch")]
+        [InlineData("file.write")]
+        [InlineData("file.create")]
+        public void GatewayConnection_FilePreflightsMustAlwaysInspectFreshIdentity(string command)
+        {
+            Assert.True(GatewayConnection.BypassesIdempotencyReceipts(new() { Command = command, ParamsJSON = "{\"preflightOnly\":true}" }));
+            Assert.False(GatewayConnection.BypassesIdempotencyReceipts(new() { Command = "system.which", ParamsJSON = "{\"preflightOnly\":true}" }));
+            if (command != "file.create")
+                Assert.False(GatewayConnection.BypassesIdempotencyReceipts(new() { Command = command, ParamsJSON = "{}" }));
+        }
+
+        [Fact]
+        public async Task GatewayConnection_ShouldAllowPreflightAndBoundTransferToShareKeyWithoutDisablingMutationReceipts()
+        {
+            var port = GetFreePort();
+            await using var server = new MockGatewayServer(port);
+            await server.StartAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var connection = new GatewayConnection($"ws://127.0.0.1:{port}/", "test-token", CreateNodeConnectParams());
+            var calls = 0;
+            connection.OnNodeInvoke += req => Task.FromResult(new BridgeInvokeResponse
+            {
+                Id = req.Id, Ok = true, PayloadJSON = JsonSerializer.Serialize(new { calls = Interlocked.Increment(ref calls) })
+            });
+            var run = connection.StartAsync(cts.Token);
+            await CompleteConnectAsync(server, cts.Token);
+            async Task<JsonElement> Invoke(string id, string parameters)
+            {
+                await server.SendJsonAsync(new
+                {
+                    type = "event", @event = "node.invoke.request",
+                    payload = new { id, nodeId = "node-files", command = "file.write", paramsJSON = parameters, idempotencyKey = "same-gateway-operation" }
+                }, cts.Token);
+                using var response = await server.ReceiveJsonAsync(cts.Token);
+                Assert.Equal("node.invoke.result", response.RootElement.GetProperty("method").GetString());
+                var result = response.RootElement.GetProperty("params").Clone();
+                await server.SendJsonAsync(new { type = "res", id = response.RootElement.GetProperty("id").GetString(), ok = true, payload = new { } }, cts.Token);
+                return result;
+            }
+            const string probe = "{\"path\":\"C:/Transfer/test.txt\",\"preflightOnly\":true}";
+            const string bound = "{\"path\":\"C:/Transfer/test.txt\",\"expectedCanonicalPath\":\"C:/Transfer/test.txt\",\"expectedBinding\":{\"kind\":\"write\"}}";
+            Assert.True((await Invoke("probe", probe)).GetProperty("ok").GetBoolean());
+            Assert.True((await Invoke("transfer", bound)).GetProperty("ok").GetBoolean());
+            Assert.Equal(2, calls);
+            Assert.True((await Invoke("retry", bound)).GetProperty("ok").GetBoolean());
+            Assert.Equal(2, calls);
+            var conflict = await Invoke("conflict", "{\"path\":\"C:/Transfer/other.txt\"}");
+            Assert.False(conflict.GetProperty("ok").GetBoolean());
+            Assert.Equal("INVALID_REQUEST", conflict.GetProperty("error").GetProperty("code").GetString());
+            Assert.Equal(2, calls);
+            Assert.True((await Invoke("fresh-probe", probe)).GetProperty("ok").GetBoolean());
+            Assert.Equal(3, calls);
+            var cached = await Invoke("retry-after-probe", bound);
+            Assert.True(cached.GetProperty("ok").GetBoolean());
+            Assert.Equal(2, JsonDocument.Parse(cached.GetProperty("payloadJSON").GetString()!).RootElement.GetProperty("calls").GetInt32());
+            Assert.Equal(3, calls);
+            cts.Cancel();
+            await run;
+        }
+
+        [WindowsFileTheory]
+        [InlineData("file.fetch")]
+        [InlineData("file.create")]
+        public async Task GatewayConnection_ShouldCarryFileTransferFramingThroughRealWebSocket(string command)
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "openclaw-file-wire-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var content = RandomNumberGenerator.GetBytes(30001);
+                var digest = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+                var path = Path.Combine(directory, "transfer.bin");
+                if (command == "file.fetch") File.WriteAllBytes(path, content);
+                var p = new Dictionary<string, object> { ["path"] = path, ["preflightOnly"] = true };
+                if (command == "file.fetch") { p["transport"] = "binary"; p["maxBytes"] = content.Length; }
+                else { p["sizeBytes"] = content.Length; p["expectedSha256"] = digest; }
+                var preflight = JsonSerializer.SerializeToElement(await new FileTransferService().ExecuteAsync(command, JsonSerializer.Serialize(p), null, default));
+                Assert.True(preflight.GetProperty("ok").GetBoolean(), preflight.ToString());
+                p.Remove("preflightOnly"); p["expectedCanonicalPath"] = preflight.GetProperty("path").GetString()!; p["expectedBinding"] = preflight.GetProperty("binding");
+                var port = GetFreePort();
+                await using var server = new MockGatewayServer(port); await server.StartAsync();
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                var store = new SecureStore(Path.Combine(directory, "identity"));
+                using var connection = new GatewayConnection($"ws://127.0.0.1:{port}/", "synthetic-token", CreateNodeConnectParams(), deviceIdentityService: new DeviceIdentityService(store), deviceTokenStore: new DeviceTokenStore(store));
+                using var executor = new NodeCommandExecutor(settings: new() { EnableFileRead = true, EnableFileWrite = true });
+                connection.OnNodeInvokeContext += executor.ExecuteContextAsync;
+                var run = connection.StartAsync(cts.Token); await CompleteConnectAsync(server, cts.Token);
+                await server.SendJsonAsync(new { type = "event", @event = "node.invoke.request", payload = new { id = "file-wire", nodeId = "node-file", command, paramsJSON = JsonSerializer.Serialize(p), timeoutMs = 0 } }, cts.Token);
+                long inputSequence = 0, progressSequence = 0;
+                async Task SendInput(object frame)
+                    => await server.SendJsonAsync(new { type = "event", @event = "node.invoke.input", payload = new { id = "file-wire", nodeId = "node-file", seq = inputSequence++, payloadJSON = JsonSerializer.Serialize(frame) } }, cts.Token);
+                async Task<JsonElement> ReadProgress()
+                {
+                    using var request = await server.ReceiveJsonAsync(cts.Token);
+                    Assert.Equal("node.invoke.progress", request.RootElement.GetProperty("method").GetString());
+                    var progress = request.RootElement.GetProperty("params"); Assert.Equal(progressSequence++, progress.GetProperty("seq").GetInt64());
+                    using var frame = JsonDocument.Parse(progress.GetProperty("chunk").GetString()!);
+                    await server.SendJsonAsync(new { type = "res", id = request.RootElement.GetProperty("id").GetString(), ok = true, payload = new { } }, cts.Token);
+                    return frame.RootElement.Clone();
+                }
+                var ready = await ReadProgress(); Assert.Equal("ready", ready.GetProperty("kind").GetString());
+                if (command == "file.fetch")
+                {
+                    await SendInput(new { v = 1, kind = "data", message = 0, index = 0, last = true, data = Convert.ToBase64String(Encoding.UTF8.GetBytes("start")) });
+                    using var received = new MemoryStream(); var index = 0;
+                    for (;;)
+                    {
+                        var frame = await ReadProgress(); Assert.Equal("data", frame.GetProperty("kind").GetString()); Assert.Equal(0, frame.GetProperty("message").GetInt32()); Assert.Equal(index++, frame.GetProperty("index").GetInt32());
+                        received.Write(Convert.FromBase64String(frame.GetProperty("data").GetString()!));
+                        if (frame.GetProperty("last").GetBoolean()) break;
+                    }
+                    Assert.Equal(content, received.ToArray());
+                    await SendInput(new { v = 1, kind = "data", message = 1, index = 0, last = true, data = Convert.ToBase64String(Encoding.UTF8.GetBytes("ack")) });
+                }
+                else
+                {
+                    for (var offset = 0; offset < content.Length; offset += NodeDuplexChannel.FragmentBytes)
+                        await SendInput(new { v = 1, kind = "data", message = 0, index = offset / NodeDuplexChannel.FragmentBytes, last = offset + NodeDuplexChannel.FragmentBytes >= content.Length, data = Convert.ToBase64String(content, offset, Math.Min(NodeDuplexChannel.FragmentBytes, content.Length - offset)) });
+                    var ack = await ReadProgress(); Assert.Equal("ack", Encoding.UTF8.GetString(Convert.FromBase64String(ack.GetProperty("data").GetString()!)));
+                    Assert.False(File.Exists(path));
+                    await SendInput(new { v = 1, kind = "data", message = 1, index = 0, last = true, data = "" });
+                }
+                using var result = await server.ReceiveJsonAsync(cts.Token);
+                Assert.Equal("node.invoke.result", result.RootElement.GetProperty("method").GetString()); Assert.True(result.RootElement.GetProperty("params").GetProperty("ok").GetBoolean());
+                using var receipt = JsonDocument.Parse(result.RootElement.GetProperty("params").GetProperty("payloadJSON").GetString()!);
+                Assert.True(receipt.RootElement.GetProperty("ok").GetBoolean(), receipt.RootElement.ToString()); Assert.Equal(digest, receipt.RootElement.GetProperty("sha256").GetString());
+                Assert.Equal(content, File.ReadAllBytes(path));
+                cts.Cancel(); await run;
+            }
+            finally { Directory.Delete(directory, recursive: true); }
+        }
+
+        [Theory]
+        [InlineData("PAIRING_REQUIRED", true)]
+        [InlineData("AUTH_SCOPE_MISMATCH", true)]
+        [InlineData("AUTH_DEVICE_TOKEN_MISMATCH", false)]
+        public async Task StoredAuthentication_UsesDeviceTokenAndClearsOnlyRejectedCredential(string code, bool retained)
+        {
+            var port = GetFreePort();
+            await using var server = new MockGatewayServer(port, challengeTimestamp: 1_800_000_123_456);
+            await server.StartAsync();
+            var endpoint = new Uri($"ws://127.0.0.1:{port}/");
+            var identityService = new DeviceIdentityService();
+            var identity = identityService.LoadOrCreate();
+            var store = new DeviceTokenStore();
+            store.Save(endpoint, identity.DeviceId, "node", "cached-device-credential", Array.Empty<string>());
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var connection = new GatewayConnection(endpoint.ToString(), "", CreateNodeConnectParams(), deviceIdentityService: identityService, deviceTokenStore: store);
+            var rejected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            connection.OnConnectRejected += _ => rejected.TrySetResult();
+            var running = connection.StartAsync(cts.Token);
+            using var connect = await server.ReceiveJsonAsync(cts.Token);
+            var parameters = connect.RootElement.GetProperty("params");
+            Assert.False(parameters.GetProperty("auth").TryGetProperty("token", out _));
+            Assert.Equal("cached-device-credential", parameters.GetProperty("auth").GetProperty("deviceToken").GetString());
+            Assert.Equal(1_800_000_123_456, parameters.GetProperty("device").GetProperty("signedAt").GetInt64());
+            await server.SendJsonAsync(new { type = "res", id = connect.RootElement.GetProperty("id").GetString(), ok = false,
+                error = new { code = "UNAUTHORIZED", message = "test rejection", details = new { code } } }, cts.Token);
+            await rejected.Task.WaitAsync(cts.Token);
+            Assert.Equal(retained, store.Load(endpoint, identity.DeviceId, "node") != null);
+            cts.Cancel();
+            await running;
+        }
+
+        [Fact]
+        public async Task DesktopStream_RelaysInspectedRfbConnectionThroughGatewayTicket()
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var localPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var localInput = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var rfb = Task.Run(async () =>
+            {
+                using var client = await listener.AcceptTcpClientAsync(deadline.Token);
+                using var stream = client.GetStream();
+                await stream.WriteAsync(Encoding.ASCII.GetBytes("RFB 003.008\n"), deadline.Token);
+                var reply = new byte[12];
+                await stream.ReadExactlyAsync(reply, deadline.Token);
+                Assert.Equal("RFB 003.008\n", Encoding.ASCII.GetString(reply));
+                await stream.WriteAsync(new byte[] { 1, 2 }, deadline.Token);
+                var input = new byte[3];
+                await stream.ReadExactlyAsync(input, deadline.Token);
+                localInput.TrySetResult(input);
+                await stream.WriteAsync(Encoding.ASCII.GetBytes("screen-data"), deadline.Token);
+                await release.Task.WaitAsync(deadline.Token);
+            }, deadline.Token);
+            try
+            {
+                var gatewayPort = GetFreePort();
+                await using var server = new MockGatewayServer(gatewayPort, sendChallenge: false);
+                await server.StartAsync();
+                using var gateway = new GatewayConnection($"ws://127.0.0.1:{gatewayPort}/mount/", "", CreateNodeConnectParams());
+                var ticket = new string('a', 48);
+                var running = DesktopStreamService.RunAsync(JsonSerializer.Serialize(new { ticket, attachPath = "/node-desktop/attach?ticket=" + ticket }), gateway, localPort, "synthetic-vnc-password", deadline.Token);
+                using var metadata = await server.ReceiveJsonAsync(deadline.Token);
+                Assert.Equal("vnc-password", metadata.RootElement.GetProperty("auth").GetString());
+                Assert.Equal("synthetic-vnc-password", metadata.RootElement.GetProperty("vncPassword").GetString());
+                var prefix = await server.ReceiveBytesAsync(deadline.Token);
+                Assert.Equal(Encoding.ASCII.GetBytes("RFB 003.008\n").Concat(new byte[] { 1, 2 }), prefix);
+                await server.SendBytesAsync(Encoding.ASCII.GetBytes("RFB 003.008\n").Concat(new byte[] { 2, 9, 8 }).ToArray(), deadline.Token, binary: true);
+                Assert.Equal(new byte[] { 2, 9, 8 }, await localInput.Task.WaitAsync(deadline.Token));
+                Assert.Equal("screen-data", Encoding.ASCII.GetString(await server.ReceiveBytesAsync(deadline.Token)));
+                release.TrySetResult();
+                await running.WaitAsync(deadline.Token);
+                await rfb;
+            }
+            finally { release.TrySetResult(); listener.Stop(); }
+        }
+
         private static ConnectParams CreateNodeConnectParams() => new()
         {
             MinProtocol = Constants.MinimumNodeProtocolVersion,
@@ -506,13 +752,17 @@ namespace OpenClaw.Node.Tests
         private sealed class MockGatewayServer : IAsyncDisposable
         {
             private readonly TcpListener _listener;
+            private readonly long? _challengeTimestamp;
+            private readonly bool _sendChallenge;
             private readonly TaskCompletionSource<NetworkStream> _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private TcpClient? _client;
             private NetworkStream? _stream;
 
-            public MockGatewayServer(int port)
+            public MockGatewayServer(int port, long? challengeTimestamp = null, bool sendChallenge = true)
             {
                 _listener = new TcpListener(IPAddress.Loopback, port);
+                _challengeTimestamp = challengeTimestamp;
+                _sendChallenge = sendChallenge;
             }
 
             public Task StartAsync()
@@ -524,18 +774,23 @@ namespace OpenClaw.Node.Tests
                     _stream = _client.GetStream();
                     await CompleteWebSocketHandshakeAsync(_stream);
                     _connected.TrySetResult(_stream);
-                    await SendJsonAsync(new { type = "event", @event = "connect.challenge", payload = new { nonce = "n" } }, CancellationToken.None);
+                    if (_sendChallenge)
+                        await SendJsonAsync(new { type = "event", @event = "connect.challenge", payload = new { nonce = "n", ts = _challengeTimestamp } }, CancellationToken.None);
                 });
                 return Task.CompletedTask;
             }
 
             public async Task SendJsonAsync(object obj, CancellationToken cancellationToken)
             {
-                var stream = await _connected.Task.WaitAsync(cancellationToken);
                 var json = JsonSerializer.Serialize(obj);
-                var payload = Encoding.UTF8.GetBytes(json);
+                await SendBytesAsync(Encoding.UTF8.GetBytes(json), cancellationToken);
+            }
+
+            public async Task SendBytesAsync(byte[] payload, CancellationToken cancellationToken, bool binary = false)
+            {
+                var stream = await _connected.Task.WaitAsync(cancellationToken);
                 using var frame = new MemoryStream();
-                frame.WriteByte(0x81);
+                frame.WriteByte(binary ? (byte)0x82 : (byte)0x81);
                 if (payload.Length < 126)
                 {
                     frame.WriteByte((byte)payload.Length);
@@ -558,9 +813,12 @@ namespace OpenClaw.Node.Tests
             }
 
             public async Task<JsonDocument> ReceiveJsonAsync(CancellationToken cancellationToken)
+                => JsonDocument.Parse(await ReceiveBytesAsync(cancellationToken));
+
+            public async Task<byte[]> ReceiveBytesAsync(CancellationToken cancellationToken)
             {
                 var stream = await _connected.Task.WaitAsync(cancellationToken);
-                var sb = new StringBuilder();
+                using var message = new MemoryStream();
                 while (true)
                 {
                     var first = await ReadByteAsync(stream, cancellationToken);
@@ -586,9 +844,9 @@ namespace OpenClaw.Node.Tests
                     {
                         continue;
                     }
-                    if (opcode is not (0 or 1)) continue;
-                    sb.Append(Encoding.UTF8.GetString(payload));
-                    if ((first & 0x80) != 0) return JsonDocument.Parse(sb.ToString());
+                    if (opcode is not (0 or 1 or 2)) continue;
+                    message.Write(payload);
+                    if ((first & 0x80) != 0) return message.ToArray();
                 }
             }
 

@@ -5,10 +5,14 @@
  */
 import { McpResponse } from './McpResponse.js';
 export class SlimMcpResponse extends McpResponse {
-    async handle(_toolName, _context) {
+    async handle(_context) {
+        const error = this.error;
+        const responseText = error
+            ? [...this.responseLines, `Error: ${error.message}`].join('\n')
+            : this.responseLines.join('\n');
         const text = {
             type: 'text',
-            text: this.responseLines.join('\n'),
+            text: responseText,
         };
         return {
             content: [text],
@@ -16,3 +20,4 @@ export class SlimMcpResponse extends McpResponse {
         };
     }
 }
+//# sourceMappingURL=SlimMcpResponse.js.map

@@ -33,16 +33,19 @@ namespace OpenClaw.Node.Services
             lock (Gate)
             {
                 var gatewayId = StableGatewayId(gatewayUri);
-                return LoadState().Entries.FirstOrDefault(entry =>
+                var entry = LoadState().Entries.FirstOrDefault(entry =>
                     string.Equals(entry.GatewayId, gatewayId, StringComparison.Ordinal) &&
                     string.Equals(entry.DeviceId, deviceId, StringComparison.Ordinal) &&
                     string.Equals(entry.Role, NormalizeRole(role), StringComparison.Ordinal));
+                CompanionLog.RegisterSecret(entry?.Token);
+                return entry;
             }
         }
 
         public void Save(Uri gatewayUri, string deviceId, string role, string token, IEnumerable<string>? scopes)
         {
             if (string.IsNullOrWhiteSpace(token)) return;
+            CompanionLog.RegisterSecret(token.Trim());
             lock (Gate)
             {
                 var state = LoadState();
@@ -63,7 +66,7 @@ namespace OpenClaw.Node.Services
             }
         }
 
-        public void Clear(Uri gatewayUri, string deviceId, string role)
+        public void Clear(Uri gatewayUri, string deviceId, string role, string? expectedToken = null)
         {
             lock (Gate)
             {
@@ -71,7 +74,8 @@ namespace OpenClaw.Node.Services
                 var gatewayId = StableGatewayId(gatewayUri);
                 var normalizedRole = NormalizeRole(role);
                 state.Entries.RemoveAll(entry =>
-                    entry.GatewayId == gatewayId && entry.DeviceId == deviceId && entry.Role == normalizedRole);
+                    entry.GatewayId == gatewayId && entry.DeviceId == deviceId && entry.Role == normalizedRole &&
+                    (expectedToken == null || entry.Token == expectedToken));
                 _store.Save("device-tokens", state);
             }
         }

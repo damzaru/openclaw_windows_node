@@ -1,0 +1,23 @@
+<Project>
+  <PropertyGroup>
+    <!-- Sync these fields from the read-only Gateway checkout with scripts/bump-build.ps1. -->
+    <GatewayVersion>2026.11.5</GatewayVersion>
+    <GatewaySourceVersion>2026.11.4</GatewaySourceVersion>
+    <GatewaySourceCommit>40437fa488611208ec5299823a3d76d84312464e</GatewaySourceCommit>
+    <GatewaySyncDate>2026-11-17</GatewaySyncDate>
+    <CompanionRevision>0</CompanionRevision>
+    <GatewayNumericVersion>$([System.Text.RegularExpressions.Regex]::Match('$(GatewayVersion)', '^\d+\.\d+\.\d+').Value)</GatewayNumericVersion>
+    <Version>$(GatewayVersion)</Version>
+    <AssemblyVersion>$(GatewayNumericVersion).0</AssemblyVersion>
+    <FileVersion>$(GatewayNumericVersion).$(CompanionRevision)</FileVersion>
+    <InformationalVersion>$(GatewayVersion)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="GatewayVersion" Value="$(GatewayVersion)" />
+    <AssemblyMetadata Include="GatewaySourceVersion" Value="$(GatewaySourceVersion)" />
+    <AssemblyMetadata Include="GatewaySourceCommit" Value="$(GatewaySourceCommit)" />
+    <AssemblyMetadata Include="GatewaySyncDate" Value="$(GatewaySyncDate)" />
+    <AssemblyMetadata Include="CompanionRevision" Value="$(CompanionRevision)" />
+  </ItemGroup>
+</Project>

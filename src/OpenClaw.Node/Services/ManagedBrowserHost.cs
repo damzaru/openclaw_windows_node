@@ -28,12 +28,36 @@ namespace OpenClaw.Node.Services
         private static readonly SemaphoreSlim Gate = new(1, 1);
         private static Process? _managedProcess;
         private static ManagedBrowserState? _lastState;
+        private static BrowserStartupTab? _startupTab;
+        private static int _diskCacheMiB = 128, _codeCacheMiB = 64;
+        internal static void ConfigureCache(CompanionSettings settings)
+        {
+            _diskCacheMiB = Math.Clamp(settings.BrowserDiskCacheMiB, 16, 2048);
+            _codeCacheMiB = Math.Clamp(settings.BrowserCodeCacheMiB, 16, 2048);
+        }
+
+        internal static async Task<BrowserProfileMaintenanceResult> MaintainProfileAsync(bool clear = false)
+        {
+            await Gate.WaitAsync();
+            try { return await Task.Run(() => BrowserProfileService.Default.Maintain(_diskCacheMiB, _codeCacheMiB, clear)); }
+            finally { Gate.Release(); }
+        }
+
+        internal static void MaintainProfileIfIdle()
+        {
+            if (!Gate.Wait(0)) return;
+            try { BrowserProfileService.Default.Maintain(_diskCacheMiB, _codeCacheMiB); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+            { BrowserLog.Info("user", "Profile/cache maintenance deferred: " + error.Message); }
+            finally { Gate.Release(); }
+        }
 
         public static async Task<ManagedBrowserState> EnsureReadyAsync(string profileName, CancellationToken cancellationToken)
         {
             await Gate.WaitAsync(cancellationToken);
             try
             {
+                BrowserProfileService.Default.Maintain(_diskCacheMiB, _codeCacheMiB);
                 var existing = await TryGetDevToolsVersionAsync(cancellationToken);
                 if (existing != null)
                 {
@@ -89,7 +113,8 @@ namespace OpenClaw.Node.Services
                 foreach (var candidate in candidates)
                 {
                     BrowserLog.Info(profileName, $"trying managed browser launch name={candidate.Name} path={candidate.Path}");
-                    var launched = TryLaunch(candidate);
+                    var startupUrl = BrowserStartupTab.CreateUrl();
+                    var launched = TryLaunch(candidate, startupUrl);
                     if (launched == null)
                     {
                         continue;
@@ -99,6 +124,8 @@ namespace OpenClaw.Node.Services
                     var version = await WaitForDevToolsVersionAsync(TimeSpan.FromSeconds(15), cancellationToken);
                     if (version != null)
                     {
+                        await WaitForStartupPageAsync(new Uri(BundledBrowserRuntimeLocator.DefaultBrowserUrl), startupUrl, cancellationToken);
+                        Interlocked.Exchange(ref _startupTab, new BrowserStartupTab(startupUrl, version.WebSocketDebuggerUrl ?? string.Empty));
                         _lastState = new ManagedBrowserState
                         {
                             LaunchMode = "managed-launch",
@@ -128,8 +155,19 @@ namespace OpenClaw.Node.Services
         }
 
         public static ManagedBrowserState? GetLastState() => _lastState;
+        public static int? GetRunningProcessId() => _managedProcess is { HasExited: false } ? _managedProcess.Id : null;
+        internal static BrowserStartupTab? TakeStartupTab() => Interlocked.Exchange(ref _startupTab, null);
 
-        private static Process? TryLaunch((string Name, string Path) candidate)
+        internal static async Task WaitForStartupPageAsync(Uri endpoint, string startupUrl, CancellationToken cancellationToken)
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            var cdp = new BrowserCdpClient(endpoint);
+            while (!(await cdp.ListTabsAsync(timeout.Token)).Any(tab => tab.Url == startupUrl))
+                await Task.Delay(50, timeout.Token);
+        }
+
+        private static Process? TryLaunch((string Name, string Path) candidate, string startupUrl)
         {
             try
             {
@@ -147,10 +185,11 @@ namespace OpenClaw.Node.Services
                 startInfo.ArgumentList.Add($"--remote-debugging-port={new Uri(BundledBrowserRuntimeLocator.DefaultBrowserUrl).Port}");
                 startInfo.ArgumentList.Add("--remote-debugging-address=127.0.0.1");
                 startInfo.ArgumentList.Add($"--user-data-dir={userDataDir}");
+                startInfo.ArgumentList.Add($"--disk-cache-size={(long)_diskCacheMiB * 1024 * 1024}");
                 startInfo.ArgumentList.Add("--no-first-run");
                 startInfo.ArgumentList.Add("--no-default-browser-check");
                 startInfo.ArgumentList.Add("--new-window");
-                startInfo.ArgumentList.Add("about:blank");
+                startInfo.ArgumentList.Add(startupUrl);
 
                 return Process.Start(startInfo);
             }
@@ -160,9 +199,9 @@ namespace OpenClaw.Node.Services
             }
         }
 
-        private static string GetUserDataDirectory()
+        internal static string GetUserDataDirectory()
         {
-            return Path.Combine(AppContext.BaseDirectory, "runtimes", "browser", "managed-profile");
+            return BrowserProfileService.Default.ProfilePath;
         }
 
         private static async Task<DevToolsVersionInfo?> TryGetDevToolsVersionAsync(CancellationToken cancellationToken)

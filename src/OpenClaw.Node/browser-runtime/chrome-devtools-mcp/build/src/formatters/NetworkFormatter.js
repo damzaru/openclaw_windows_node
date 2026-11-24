@@ -4,7 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  * */
 import { isUtf8 } from 'node:buffer';
+import { DevTools, } from '../third_party/index.js';
+import { truncateText, truncateUrl } from '../utils/text.js';
 const BODY_CONTEXT_SIZE_LIMIT = 10000;
+/**
+ * How long to wait for a response body. Puppeteer reads a body only after the
+ * response finished loading, with no timeout of its own, and a response that
+ * never finishes (e.g. a `Cache-Control: no-store` response the page did not
+ * read) would otherwise hold the tool mutex forever.
+ */
+export const RESPONSE_BODY_TIMEOUT_MS = 5000;
+class ResponseBodyTimeoutError extends Error {
+    timeout;
+    constructor(timeout) {
+        super(`Response body timed out after ${timeout} ms`);
+        this.timeout = timeout;
+    }
+}
+function responseBodyTimeoutMessage(error) {
+    return `<Response body not available: the response did not finish loading within ${error.timeout} ms>`;
+}
 export class NetworkFormatter {
     #request;
     #options;
@@ -37,23 +56,21 @@ export class NetworkFormatter {
             const requestBodyNotAvailableMessage = '<Request body not available anymore>';
             if (this.#options.requestFilePath) {
                 if (!this.#options.saveFile) {
-                    throw new Error('saveFile is not provided');
+                    throw new Error('Unable to save the request body to a file: no saveFile callback was configured.');
                 }
                 if (data) {
-                    await this.#options.saveFile(Buffer.from(data), this.#options.requestFilePath);
-                    this.#requestBodyFilePath = this.#options.requestFilePath;
+                    const result = await this.#options.saveFile(Buffer.from(data), this.#options.requestFilePath, '.network-request');
+                    this.#requestBodyFilePath = result.filename;
                 }
                 else {
                     this.#requestBody = requestBodyNotAvailableMessage;
                 }
             }
+            else if (data) {
+                this.#requestBody = getSizeLimitedString(data, BODY_CONTEXT_SIZE_LIMIT);
+            }
             else {
-                if (data) {
-                    this.#requestBody = getSizeLimitedString(data, BODY_CONTEXT_SIZE_LIMIT);
-                }
-                else {
-                    this.#requestBody = requestBodyNotAvailableMessage;
-                }
+                this.#requestBody = requestBodyNotAvailableMessage;
             }
         }
         // Load Response Body
@@ -61,19 +78,22 @@ export class NetworkFormatter {
         if (response) {
             const responseBodyNotAvailableMessage = '<Response body not available anymore>';
             if (this.#options.responseFilePath) {
+                let buffer;
                 try {
-                    const buffer = await response.buffer();
+                    buffer = await this.#readResponseBody(response);
+                }
+                catch (error) {
+                    this.#responseBody =
+                        error instanceof ResponseBodyTimeoutError
+                            ? responseBodyTimeoutMessage(error)
+                            : responseBodyNotAvailableMessage;
+                }
+                if (buffer) {
                     if (!this.#options.saveFile) {
-                        throw new Error('saveFile is not provided');
+                        throw new Error('Unable to save the response body to a file: no saveFile callback was configured.');
                     }
-                    await this.#options.saveFile(buffer, this.#options.responseFilePath);
-                    this.#responseBodyFilePath = this.#options.responseFilePath;
-                }
-                catch {
-                    // Flatten error handling for buffer() failure and save failure
-                }
-                if (!this.#responseBodyFilePath) {
-                    this.#responseBody = responseBodyNotAvailableMessage;
+                    const result = await this.#options.saveFile(buffer, this.#options.responseFilePath, '.network-response');
+                    this.#responseBodyFilePath = result.filename;
                 }
             }
             else {
@@ -85,7 +105,7 @@ export class NetworkFormatter {
         return convertNetworkRequestConciseToString(this.toJSON());
     }
     toStringDetailed() {
-        return converNetworkRequestDetailedToStringDetailed(this.toJSONDetailed());
+        return convertNetworkRequestDetailedToStringDetailed(this.toJSONDetailed());
     }
     toJSON() {
         return {
@@ -96,8 +116,23 @@ export class NetworkFormatter {
             selectedInDevToolsUI: this.#options.selectedInDevToolsUI,
         };
     }
+    #redactNetworkHeaders(headers) {
+        const headersList = Object.entries(headers).map(item => {
+            return { name: item[0], value: item[1] };
+        });
+        const redacted = DevTools.NetworkRequestFormatter.sanitizeHeaders(headersList);
+        return redacted.reduce((acc, item) => {
+            acc[item.name] = item.value;
+            return acc;
+        }, {});
+    }
     toJSONDetailed() {
-        const redirectChain = this.#request.redirectChain();
+        // Puppeteer shares one redirect chain array between all hops of a
+        // redirect, so earlier hops also list themselves and the hops after them.
+        // Keep only the requests that redirected to this one.
+        const fullChain = this.#request.redirectChain();
+        const ownIndex = fullChain.indexOf(this.#request);
+        const redirectChain = ownIndex === -1 ? fullChain : fullChain.slice(0, ownIndex);
         const formattedRedirectChain = redirectChain.reverse().map(request => {
             const id = this.#options.requestIdResolver
                 ? this.#options.requestIdResolver(request)
@@ -105,15 +140,21 @@ export class NetworkFormatter {
             const formatter = new NetworkFormatter(request, {
                 requestId: id,
                 saveFile: this.#options.saveFile,
+                redactNetworkHeaders: this.#options.redactNetworkHeaders,
             });
             return formatter.toJSON();
         });
+        const responseHeaders = this.#request.response()?.headers();
         return {
             ...this.toJSON(),
-            requestHeaders: this.#request.headers(),
+            requestHeaders: this.#options.redactNetworkHeaders
+                ? this.#redactNetworkHeaders(this.#request.headers())
+                : this.#request.headers(),
             requestBody: this.#requestBody,
             requestBodyFilePath: this.#requestBodyFilePath,
-            responseHeaders: this.#request.response()?.headers(),
+            responseHeaders: this.#options.redactNetworkHeaders && responseHeaders
+                ? this.#redactNetworkHeaders(responseHeaders)
+                : this.#request.response()?.headers(),
             responseBody: this.#responseBody,
             responseBodyFilePath: this.#responseBodyFilePath,
             failure: this.#request.failure()?.errorText,
@@ -139,7 +180,7 @@ export class NetworkFormatter {
     }
     async #getFormattedResponseBody(httpResponse, sizeLimit = BODY_CONTEXT_SIZE_LIMIT) {
         try {
-            const responseBuffer = await httpResponse.buffer();
+            const responseBuffer = await this.#readResponseBody(httpResponse);
             if (isUtf8(responseBuffer)) {
                 const responseAsTest = responseBuffer.toString('utf-8');
                 if (responseAsTest.length === 0) {
@@ -149,34 +190,53 @@ export class NetworkFormatter {
             }
             return '<binary data>';
         }
-        catch {
+        catch (error) {
+            if (error instanceof ResponseBodyTimeoutError) {
+                return responseBodyTimeoutMessage(error);
+            }
             return '<not available anymore>';
+        }
+    }
+    async #readResponseBody(httpResponse) {
+        const timeout = this.#options.responseBodyTimeout ?? RESPONSE_BODY_TIMEOUT_MS;
+        let timeoutId;
+        try {
+            return await Promise.race([
+                httpResponse.buffer(),
+                new Promise((_, reject) => {
+                    timeoutId = setTimeout(() => {
+                        reject(new ResponseBodyTimeoutError(timeout));
+                    }, timeout);
+                }),
+            ]);
+        }
+        finally {
+            clearTimeout(timeoutId);
         }
     }
 }
 function getSizeLimitedString(text, sizeLimit) {
-    if (text.length > sizeLimit) {
-        return text.substring(0, sizeLimit) + '... <truncated>';
-    }
-    return text;
+    return truncateText(text, sizeLimit, { ellipsis: '... <truncated>' });
 }
 function convertNetworkRequestConciseToString(data) {
-    // TODO truncate the URL
-    return `reqid=${data.requestId} ${data.method} ${data.url} [${data.status}]${data.selectedInDevToolsUI ? ` [selected in the DevTools Network panel]` : ''}`;
+    // Long URLs (e.g., data: URLs) bloat the concise list output. The full URL
+    // remains available via the detailed view and the structured content.
+    const url = truncateUrl(data.url);
+    return `reqid=${data.requestId} ${data.method} ${url} [${data.status}]${data.selectedInDevToolsUI ? ` [selected in the DevTools Network panel]` : ''}`;
 }
-function formatHeadlers(headers) {
+function formatHeaders(headers) {
     const response = [];
     for (const [name, value] of Object.entries(headers)) {
         response.push(`- ${name}:${value}`);
     }
     return response;
 }
-function converNetworkRequestDetailedToStringDetailed(data) {
+function convertNetworkRequestDetailedToStringDetailed(data) {
     const response = [];
     response.push(`## Request ${data.url}`);
     response.push(`Status: ${data.status}`);
     response.push(`### Request Headers`);
-    for (const line of formatHeadlers(data.requestHeaders)) {
+    for (const line of formatHeaders(data.requestHeaders)) {
         response.push(line);
     }
     if (data.requestBody) {
@@ -189,7 +249,7 @@ function converNetworkRequestDetailedToStringDetailed(data) {
     }
     if (data.responseHeaders) {
         response.push(`### Response Headers`);
-        for (const line of formatHeadlers(data.responseHeaders)) {
+        for (const line of formatHeaders(data.responseHeaders)) {
             response.push(line);
         }
     }
@@ -209,10 +269,13 @@ function converNetworkRequestDetailedToStringDetailed(data) {
     if (redirectChain?.length) {
         response.push(`### Redirect chain`);
         let indent = 0;
-        for (const request of redirectChain.reverse()) {
-            response.push(`${'  '.repeat(indent)}${convertNetworkRequestConciseToString(request)})}`);
+        // `redirectChain` is already ordered by toJSONDetailed(); don't reverse it
+        // again here or the text output contradicts structuredContent (the JSON).
+        for (const request of redirectChain) {
+            response.push(`${'  '.repeat(indent)}${convertNetworkRequestConciseToString(request)}`);
             indent++;
         }
     }
     return response.join('\n');
 }
+//# sourceMappingURL=NetworkFormatter.js.map

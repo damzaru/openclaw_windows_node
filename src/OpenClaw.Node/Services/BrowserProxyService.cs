@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using OpenClaw.Node.Protocol;
 
 namespace OpenClaw.Node.Services
 {
@@ -51,6 +52,8 @@ namespace OpenClaw.Node.Services
         public string Title { get; set; } = string.Empty;
         public string Url { get; set; } = string.Empty;
         public string Type { get; set; } = "page";
+        public object? Ownership { get; set; }
+        public string? ResolvedProfile { get; set; }
     }
 
     internal sealed class BrowserProfileStatus
@@ -75,12 +78,20 @@ namespace OpenClaw.Node.Services
         Task<BrowserTab> OpenTabAsync(string profileName, string url, CancellationToken cancellationToken);
         Task FocusTabAsync(string profileName, string targetId, CancellationToken cancellationToken);
         Task CloseTabAsync(string profileName, string targetId, CancellationToken cancellationToken);
+        Task<object> CloseOwnedTabAsync(string profileName, JsonElement ownership, CancellationToken cancellationToken)
+            => throw new BrowserRouteException(501, "Owned-tab cleanup is not supported by this backend");
         Task<string> NavigateAsync(string profileName, string targetId, string url, CancellationToken cancellationToken);
         Task<object?> ListConsoleMessagesAsync(string profileName, string? targetId, string? level, bool clear, int? limit, CancellationToken cancellationToken);
         Task<object?> ListNetworkRequestsAsync(string profileName, string? targetId, string? filter, bool clear, int? limit, CancellationToken cancellationToken);
         Task<List<Dictionary<string, object?>>> GetRequestMatchesAsync(string profileName, string targetId, string? filter, int limit, CancellationToken cancellationToken);
         Task<Dictionary<string, object?>?> GetLatestRequestAsync(string profileName, string targetId, string? filter, CancellationToken cancellationToken);
         string? GetLastError(string profileName);
+        Task<string> SnapshotAsync(string profileName, string targetId, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Browser snapshots are not available from this backend");
+        Task ActAsync(string profileName, string targetId, string kind, JsonElement body, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Browser input is not available from this backend");
+        Task UploadAsync(string profileName, string targetId, string uid, string[] paths, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Browser uploads are not available from this backend");
     }
 
     public sealed class BrowserProxyService : IBrowserProxyService
@@ -132,15 +143,18 @@ namespace OpenClaw.Node.Services
                     "/tabs/open" when method == "POST" => await WrapResultAsync(HandleOpenTabAsync(profile, request.Body, ct)),
                     "/tabs/focus" when method == "POST" => await WrapResultAsync(HandleFocusTabAsync(profile, request.Body, ct)),
                     _ when method == "DELETE" && path.StartsWith("/tabs/", StringComparison.OrdinalIgnoreCase) => await WrapResultAsync(HandleCloseTabAsync(profile, path, ct)),
+                    "/__openclaw/session-tab/close-owned" when method == "POST" => await WrapResultAsync(HandleCloseOwnedTabAsync(profile, request.Body, ct)),
                     "/navigate" when method == "POST" => await WrapResultAsync(HandleNavigateAsync(profile, request.Body, ct)),
                     "/console" when method == "GET" => await WrapResultAsync(HandleConsoleAsync(profile, request.Query, ct)),
                     "/requests" when method == "GET" => await WrapResultAsync(HandleRequestsAsync(profile, request.Query, ct)),
                     "/requests/matches" when method == "GET" => await WrapResultAsync(HandleRequestMatchesAsync(profile, request.Query, ct)),
                     "/request-body" when method == "GET" => await WrapResultAsync(HandleRequestBodyAsync(profile, request.Query, ct)),
                     "/requests/latest-body" when method == "GET" => await WrapResultAsync(HandleLatestRequestBodyAsync(profile, request.Query, ct)),
-                    "/act" when method == "POST" => await HandleActAsync(profile, request.Body, ct),
+                    "/act" when method == "POST" => await WrapResultAsync(HandleActAsync(profile, request.Body, ct)),
+                    "/snapshot" when method == "GET" => await WrapResultAsync(HandleSnapshotAsync(profile, request.Query, ct)),
+                    "/hooks/file-chooser" when method == "POST" => await WrapResultAsync(HandleFileChooserAsync(profile, request.Body, ct)),
                     "/screenshot" when method == "POST" => await HandleScreenshotAsync(profile, request.Body, ct),
-                    _ => throw new InvalidOperationException($"browser.proxy route not supported yet: {method} {path}")
+                    _ => throw new BrowserRouteException(501, $"browser.proxy route not supported yet: {method} {path}")
                 };
 
                 BrowserLog.Info(profile, $"proxy ok {method} {path}");
@@ -219,7 +233,6 @@ namespace OpenClaw.Node.Services
         private async Task<object> HandleFocusTabAsync(string profile, JsonElement? body, CancellationToken cancellationToken)
         {
             var targetId = RequireString(body, "targetId");
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             await _backend.FocusTabAsync(profile, targetId, cancellationToken);
             return new { ok = true };
         }
@@ -231,18 +244,25 @@ namespace OpenClaw.Node.Services
             {
                 throw new InvalidOperationException("targetId is required");
             }
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             await _backend.CloseTabAsync(profile, targetId, cancellationToken);
             return new { ok = true };
+        }
+
+        private async Task<object> HandleCloseOwnedTabAsync(string profile, JsonElement? body, CancellationToken cancellationToken)
+        {
+            if (body is not JsonElement value || value.ValueKind != JsonValueKind.Object || !value.TryGetProperty("ownership", out var ownership))
+                throw new BrowserRouteException(400, "Valid durable tab ownership is required");
+            return await _backend.CloseOwnedTabAsync(profile, ownership, cancellationToken);
         }
 
         private async Task<object> HandleNavigateAsync(string profile, JsonElement? body, CancellationToken cancellationToken)
         {
             var url = RequireString(body, "url");
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             var targetId = TryGetString(body, "targetId");
             if (string.IsNullOrWhiteSpace(targetId))
             {
+                // Only an explicit navigation without a target may create a browser.
+                await _backend.EnsureAvailableAsync(profile, cancellationToken);
                 var tabs = await _backend.ListTabsAsync(profile, cancellationToken);
                 var preferred = tabs.FirstOrDefault(t => string.Equals(t.Type, "page", StringComparison.OrdinalIgnoreCase))
                                 ?? tabs.FirstOrDefault();
@@ -259,7 +279,6 @@ namespace OpenClaw.Node.Services
 
         private async Task<object> HandleConsoleAsync(string profile, Dictionary<string, string>? query, CancellationToken cancellationToken)
         {
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             var targetId = query != null && query.TryGetValue("targetId", out var qTarget) ? qTarget : null;
             var level = query != null && query.TryGetValue("level", out var qLevel) ? qLevel : null;
             var clear = query != null && query.TryGetValue("clear", out var qClear) && bool.TryParse(qClear, out var parsedClear) ? parsedClear : false;
@@ -270,7 +289,6 @@ namespace OpenClaw.Node.Services
 
         private async Task<object> HandleRequestsAsync(string profile, Dictionary<string, string>? query, CancellationToken cancellationToken)
         {
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             var targetId = query != null && query.TryGetValue("targetId", out var qTarget) ? qTarget : null;
             var filter = query != null && query.TryGetValue("filter", out var qFilter) ? qFilter : null;
             var clear = query != null && query.TryGetValue("clear", out var qClear) && bool.TryParse(qClear, out var parsedClear) ? parsedClear : false;
@@ -299,7 +317,6 @@ namespace OpenClaw.Node.Services
 
         private async Task<object> HandleRequestMatchesAsync(string profile, Dictionary<string, string>? query, CancellationToken cancellationToken)
         {
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             var targetId = query != null && query.TryGetValue("targetId", out var qTarget) ? qTarget : null;
             if (string.IsNullOrWhiteSpace(targetId))
             {
@@ -319,7 +336,6 @@ namespace OpenClaw.Node.Services
 
         private async Task<object> HandleRequestBodyAsync(string profile, Dictionary<string, string>? query, CancellationToken cancellationToken)
         {
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             var targetId = query != null && query.TryGetValue("targetId", out var qTarget) ? qTarget : null;
             var requestId = query != null && query.TryGetValue("requestId", out var qRequest) ? qRequest : null;
             if (string.IsNullOrWhiteSpace(targetId) || string.IsNullOrWhiteSpace(requestId))
@@ -334,7 +350,6 @@ namespace OpenClaw.Node.Services
 
         private async Task<object> HandleLatestRequestBodyAsync(string profile, Dictionary<string, string>? query, CancellationToken cancellationToken)
         {
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             var targetId = query != null && query.TryGetValue("targetId", out var qTarget) ? qTarget : null;
             if (string.IsNullOrWhiteSpace(targetId))
             {
@@ -354,9 +369,7 @@ namespace OpenClaw.Node.Services
             var target = await ChromeMcpBrowserBackend.GetDevToolsTargetAsync(targetId, cancellationToken);
             var monitor = await ChromeMcpBrowserBackend.DevToolsActivityMonitor.EnsureAsync(target, cancellationToken);
             var body = await monitor.GetResponseBodyAsync(requestId, cancellationToken);
-            var preview = body.body.Length > 300 ? body.body.Substring(0, 300) : body.body;
-            preview = preview.Replace("\r", "\\r").Replace("\n", "\\n");
-            BrowserLog.Info(profile, $"latest-body requestId={requestId} base64={body.base64Encoded} len={body.body.Length} preview={preview}");
+            BrowserLog.Info(profile, $"latest-body requestId={requestId} base64={body.base64Encoded} len={body.body.Length}");
             var matchedUrl = latest.TryGetValue("url", out var urlObj) ? urlObj?.ToString() ?? string.Empty : string.Empty;
             BrowserLog.Info(profile, $"latest-body matched requestId={requestId} url={matchedUrl}");
             return new { ok = true, targetId, requestId, matchedUrl, request = latest, body.base64Encoded, body.body };
@@ -365,13 +378,13 @@ namespace OpenClaw.Node.Services
         private async Task<object> HandleActAsync(string profile, JsonElement? body, CancellationToken cancellationToken)
         {
             var kind = RequireString(body, "kind");
+            var targetId = RequireString(body, "targetId");
             if (!string.Equals(kind, "evaluate", StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException($"browser act kind not supported yet: {kind}");
+                await _backend.ActAsync(profile, targetId, kind, body!.Value, cancellationToken);
+                return new { ok = true, targetId };
             }
-            var targetId = RequireString(body, "targetId");
             var fn = RequireString(body, "fn");
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             var result = await ChromeMcpBrowserBackend.EvaluateViaDevToolsWebSocketAsync(targetId, fn, cancellationToken);
             var tabs = await _backend.ListTabsAsync(profile, cancellationToken);
             var found = tabs.FirstOrDefault(t => string.Equals(t.TargetId, targetId, StringComparison.OrdinalIgnoreCase));
@@ -384,12 +397,31 @@ namespace OpenClaw.Node.Services
             };
         }
 
+        private async Task<object> HandleSnapshotAsync(string profile, Dictionary<string, string>? query, CancellationToken cancellationToken)
+        {
+            if (query == null || !query.TryGetValue("targetId", out var targetId) || string.IsNullOrWhiteSpace(targetId))
+                throw new InvalidOperationException("INVALID_REQUEST: snapshot targetId is required");
+            var snapshot = await _backend.SnapshotAsync(profile, targetId, cancellationToken);
+            var tabs = await _backend.ListTabsAsync(profile, cancellationToken);
+            return new { ok = true, targetId, url = tabs.FirstOrDefault(t => t.TargetId == targetId)?.Url ?? "", format = "ai", snapshot };
+        }
+
+        private async Task<object> HandleFileChooserAsync(string profile, JsonElement? body, CancellationToken cancellationToken)
+        {
+            var targetId = RequireString(body, "targetId");
+            var uid = TryGetString(body, "inputRef") ?? RequireString(body, "ref");
+            if (body?.TryGetProperty("paths", out var paths) != true || paths.ValueKind != JsonValueKind.Array ||
+                paths.GetArrayLength() is < 1 or > 256 || paths.EnumerateArray().Any(p => p.ValueKind != JsonValueKind.String || !Path.IsPathFullyQualified(p.GetString()!)))
+                throw new InvalidOperationException("INVALID_REQUEST: file chooser paths must be absolute paths");
+            await _backend.UploadAsync(profile, targetId, uid, paths.EnumerateArray().Select(p => p.GetString()!).ToArray(), cancellationToken);
+            return new { ok = true };
+        }
+
         private async Task<object> HandleScreenshotAsync(string profile, JsonElement? body, CancellationToken cancellationToken)
         {
             var targetId = RequireString(body, "targetId");
             var type = string.Equals(TryGetString(body, "type"), "jpeg", StringComparison.OrdinalIgnoreCase) ? "jpeg" : "png";
             var fullPage = TryGetBool(body, "fullPage") ?? false;
-            await _backend.EnsureAvailableAsync(profile, cancellationToken);
             var screenshot = await ChromeMcpBrowserBackend.CaptureScreenshotViaDevToolsWebSocketAsync(targetId, fullPage, type, cancellationToken);
             var tabs = await _backend.ListTabsAsync(profile, cancellationToken);
             var found = tabs.FirstOrDefault(t => string.Equals(t.TargetId, targetId, StringComparison.OrdinalIgnoreCase));
@@ -463,7 +495,6 @@ namespace OpenClaw.Node.Services
         {
             try
             {
-                await _backend.EnsureAvailableAsync(profile, cancellationToken);
                 return await _backend.ListTabsAsync(profile, cancellationToken);
             }
             catch
@@ -515,17 +546,78 @@ namespace OpenClaw.Node.Services
 
     internal sealed class ChromeMcpBrowserBackend : IBrowserBackend, IDisposable
     {
+        private readonly BrowserCdpClient _cdp;
+        internal ChromeMcpBrowserBackend(BrowserCdpClient? cdp = null) => _cdp = cdp ?? new BrowserCdpClient();
         private static readonly HttpClient DevToolsHttp = new HttpClient();
         private readonly ConcurrentDictionary<string, ChromeMcpSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _sessionGates = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, string> _lastErrors = new(StringComparer.OrdinalIgnoreCase);
+        private readonly SemaphoreSlim _pageOperationGate = new(1, 1);
+
+        private async Task<CallToolResult> PageToolAsync(string profileName, string targetId, string tool, Dictionary<string, object?> args, CancellationToken cancellationToken)
+        {
+            await _pageOperationGate.WaitAsync(cancellationToken);
+            try
+            {
+                var native = await _cdp.GetTargetAsync(targetId, cancellationToken);
+                var session = await GetSessionAsync(profileName, cancellationToken);
+                var pages = ExtractPages(await session.CallToolAsync("list_pages", new(), cancellationToken));
+                var matches = pages.Where(page => page.Url == native.Url).ToArray();
+                if (matches.Length != 1)
+                    throw new InvalidOperationException("Browser target is ambiguous in the attached runtime; use a tab with a unique URL before this action");
+                // Never infer MCP page identity from DevTools list order.
+                args["pageId"] = matches[0].Id;
+                return await session.CallToolAsync(tool, args, cancellationToken);
+            }
+            finally { _pageOperationGate.Release(); }
+        }
+
+        public async Task<string> SnapshotAsync(string profileName, string targetId, CancellationToken cancellationToken)
+        {
+            var result = await PageToolAsync(profileName, targetId, "take_snapshot", new(), cancellationToken);
+            return string.Join("\n", result.Content.OfType<TextContentBlock>().Select(b => b.Text));
+        }
+
+        public async Task ActAsync(string profileName, string targetId, string kind, JsonElement body, CancellationToken cancellationToken)
+        {
+            string Required(string key) => body.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(value.GetString())
+                ? value.GetString()! : throw new InvalidOperationException("INVALID_REQUEST: browser action requires " + key);
+            var args = new Dictionary<string, object?>();
+            var tool = kind switch
+            {
+                "click" => "click", "hover" => "hover", "type" => "fill", "press" => "press_key", "drag" => "drag",
+                _ => throw new InvalidOperationException("INVALID_REQUEST: unsupported browser action kind: " + kind),
+            };
+            if (kind is "click" or "hover" or "type") args["uid"] = Required("ref");
+            if (kind == "click" && body.TryGetProperty("doubleClick", out var twice)) args["dblClick"] = twice.GetBoolean();
+            if (kind == "type") args["value"] = body.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String
+                ? text.GetString() : throw new InvalidOperationException("INVALID_REQUEST: browser action requires text");
+            if (kind == "press") args["key"] = Required("key");
+            if (kind == "drag") { args["from_uid"] = Required("startRef"); args["to_uid"] = Required("endRef"); }
+            await PageToolAsync(profileName, targetId, tool, args, cancellationToken);
+            if (kind == "type" && body.TryGetProperty("submit", out var submit) && submit.ValueKind == JsonValueKind.True)
+                await PageToolAsync(profileName, targetId, "press_key", new() { ["key"] = "Enter" }, cancellationToken);
+        }
+
+        public async Task UploadAsync(string profileName, string targetId, string uid, string[] paths, CancellationToken cancellationToken)
+        {
+            if (paths.Length is < 1 or > 256) throw new InvalidOperationException("INVALID_REQUEST: upload requires between 1 and 256 staged files");
+            await PageToolAsync(profileName, targetId, "upload_file", new() { ["uid"] = uid, ["filePaths"] = paths }, cancellationToken);
+        }
 
         public async Task EnsureAvailableAsync(string profileName, CancellationToken cancellationToken)
         {
             BrowserLog.Info(profileName, "EnsureAvailable start");
             try
             {
-                await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
+                if (_cdp.Endpoint.ToString().TrimEnd('/') == BundledBrowserRuntimeLocator.DefaultBrowserUrl)
+                {
+                    await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
+                    var startup = ManagedBrowserHost.TakeStartupTab();
+                    if (startup != null) _cdp.RegisterStartupTab(startup);
+                }
+                else
+                    _ = await _cdp.ListTabsAsync(cancellationToken);
                 _ = await GetSessionAsync(profileName, cancellationToken);
                 ClearLastError(profileName);
                 BrowserLog.Info(profileName, "EnsureAvailable ok");
@@ -538,74 +630,30 @@ namespace OpenClaw.Node.Services
             }
         }
 
-        public async Task<int?> GetPidAsync(string profileName, CancellationToken cancellationToken)
-        {
-            try
-            {
-                var browserState = await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
-                var session = await GetSessionAsync(profileName, cancellationToken);
-                ClearLastError(profileName);
-                return browserState.ProcessId ?? session.ProcessId;
-            }
-            catch (Exception ex)
-            {
-                SetLastError(profileName, ex);
-                throw;
-            }
-        }
+        public Task<int?> GetPidAsync(string profileName, CancellationToken cancellationToken)
+            => Task.FromResult(ManagedBrowserHost.GetRunningProcessId());
 
         public async Task<IReadOnlyList<BrowserTab>> ListTabsAsync(string profileName, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
-            BrowserLog.Info(profileName, "DevTools HTTP /json/list start");
             try
             {
-                var direct = await ListTabsViaDevToolsHttpAsync();
-                if (direct.Count > 0)
-                {
-                    ClearLastError(profileName);
-                    BrowserLog.Info(profileName, $"DevTools HTTP /json/list ok count={direct.Count}");
-                    return direct;
-                }
-                BrowserLog.Info(profileName, "DevTools HTTP /json/list returned 0 tabs; falling back to MCP list_pages");
-            }
-            catch (Exception ex)
-            {
-                BrowserLog.Error(profileName, $"DevTools HTTP /json/list failed: {ex.Message}");
-            }
-
-            BrowserLog.Info(profileName, "list_pages start");
-            try
-            {
-                var session = await GetSessionAsync(profileName, cancellationToken);
-                var result = await session.CallToolAsync("list_pages", new Dictionary<string, object?>(), cancellationToken);
-                var pages = ExtractPages(result);
-                foreach (var page in pages)
-                {
-                    if (string.IsNullOrWhiteSpace(page.Title))
-                    {
-                        page.Title = await TryGetPageTitleAsync(session, page.Id, cancellationToken) ?? string.Empty;
-                    }
-                }
+                var tabs = await _cdp.ListTabsAsync(cancellationToken);
                 ClearLastError(profileName);
-                BrowserLog.Info(profileName, $"list_pages ok count={pages.Count}");
-                return pages.Select(ToTab).ToList();
+                return tabs;
             }
             catch (Exception ex)
             {
                 SetLastError(profileName, ex);
-                BrowserLog.Error(profileName, $"list_pages failed: {ex.Message}");
                 throw;
             }
         }
 
         public async Task<BrowserTab> OpenTabAsync(string profileName, string url, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
             BrowserLog.Info(profileName, $"DevTools HTTP /json/new start url={url}");
             try
             {
-                var created = await OpenTabViaDevToolsHttpAsync(url);
+                var created = await _cdp.OpenTabAsync(profileName, url, cancellationToken);
                 ClearLastError(profileName);
                 BrowserLog.Info(profileName, $"DevTools HTTP /json/new ok targetId={created.TargetId}");
                 return created;
@@ -620,7 +668,6 @@ namespace OpenClaw.Node.Services
 
         public async Task FocusTabAsync(string profileName, string targetId, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
             BrowserLog.Info(profileName, $"DevTools HTTP /json/activate start targetId={targetId}");
             try
             {
@@ -638,11 +685,10 @@ namespace OpenClaw.Node.Services
 
         public async Task CloseTabAsync(string profileName, string targetId, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
             BrowserLog.Info(profileName, $"DevTools HTTP /json/close start targetId={targetId}");
             try
             {
-                await CloseTabViaDevToolsHttpAsync(targetId);
+                await _cdp.CloseTabAsync(targetId, cancellationToken);
                 ClearLastError(profileName);
                 BrowserLog.Info(profileName, $"DevTools HTTP /json/close ok targetId={targetId}");
             }
@@ -654,9 +700,11 @@ namespace OpenClaw.Node.Services
             }
         }
 
+        public Task<object> CloseOwnedTabAsync(string profileName, JsonElement ownership, CancellationToken cancellationToken)
+            => _cdp.CloseOwnedTabAsync(profileName, ownership, cancellationToken);
+
         public async Task<string> NavigateAsync(string profileName, string targetId, string url, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
             BrowserLog.Info(profileName, $"DevTools WS navigate start targetId={targetId} url={url}");
             try
             {
@@ -681,20 +729,21 @@ namespace OpenClaw.Node.Services
             await gate.WaitAsync(cancellationToken);
             try
             {
+                var browserFingerprint = await _cdp.GetBrowserFingerprintAsync(profileName, cancellationToken);
                 if (_sessions.TryGetValue(profileName, out var existing))
                 {
-                    if (!existing.IsFaulted)
+                    if (!existing.IsFaulted && existing.BrowserFingerprint == browserFingerprint)
                     {
                         BrowserLog.Info(profileName, $"reusing session pid={existing.ProcessId}");
                         return existing;
                     }
 
-                    BrowserLog.Info(profileName, "dropping faulted session");
+                    BrowserLog.Info(profileName, "dropping retired browser session");
                     _sessions.TryRemove(profileName, out _);
                     await existing.DisposeAsync();
                 }
 
-                var created = new ChromeMcpSession(profileName);
+                var created = new ChromeMcpSession(profileName, _cdp.Endpoint, browserFingerprint);
                 _sessions[profileName] = created;
                 try
                 {
@@ -720,7 +769,6 @@ namespace OpenClaw.Node.Services
 
         public async Task<object?> ListConsoleMessagesAsync(string profileName, string? targetId, string? level, bool clear, int? limit, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
             var target = await GetPreferredTargetAsync(targetId, cancellationToken);
             var monitor = await DevToolsActivityMonitor.EnsureAsync(target, cancellationToken);
             return monitor.GetConsole(level, clear, limit);
@@ -728,7 +776,6 @@ namespace OpenClaw.Node.Services
 
         public async Task<object?> ListNetworkRequestsAsync(string profileName, string? targetId, string? filter, bool clear, int? limit, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
             var target = await GetPreferredTargetAsync(targetId, cancellationToken);
             var monitor = await DevToolsActivityMonitor.EnsureAsync(target, cancellationToken);
             return monitor.GetRequests(filter, clear, limit);
@@ -736,7 +783,6 @@ namespace OpenClaw.Node.Services
 
         public async Task<List<Dictionary<string, object?>>> GetRequestMatchesAsync(string profileName, string targetId, string? filter, int limit, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
             var target = await GetPreferredTargetAsync(targetId, cancellationToken);
             var monitor = await DevToolsActivityMonitor.EnsureAsync(target, cancellationToken);
             return monitor.GetRequestMatches(filter, limit);
@@ -744,7 +790,6 @@ namespace OpenClaw.Node.Services
 
         public async Task<Dictionary<string, object?>?> GetLatestRequestAsync(string profileName, string targetId, string? filter, CancellationToken cancellationToken)
         {
-            await ManagedBrowserHost.EnsureReadyAsync(profileName, cancellationToken);
             var target = await GetPreferredTargetAsync(targetId, cancellationToken);
             var monitor = await DevToolsActivityMonitor.EnsureAsync(target, cancellationToken);
             return monitor.GetLatestRequest(filter);
@@ -768,23 +813,6 @@ namespace OpenClaw.Node.Services
             Debug.WriteLine($"[browser][{profileName}] {message}");
         }
 
-        private static int ParsePageId(string targetId)
-        {
-            if (!int.TryParse(targetId?.Trim(), out var parsed))
-            {
-                throw new InvalidOperationException("tab not found");
-            }
-            return parsed;
-        }
-
-        private static BrowserTab ToTab(ChromeMcpPage page) => new BrowserTab
-        {
-            TargetId = page.Id.ToString(),
-            Title = page.Title ?? string.Empty,
-            Url = page.Url ?? string.Empty,
-            Type = "page",
-        };
-
         private static async Task<IReadOnlyList<BrowserTab>> ListTabsViaDevToolsHttpAsync()
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -796,29 +824,10 @@ namespace OpenClaw.Node.Services
                 .ToList();
         }
 
-        private static async Task<BrowserTab> OpenTabViaDevToolsHttpAsync(string url)
-        {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var request = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:9222/json/new?{Uri.EscapeDataString(url)}");
-            using var response = await DevToolsHttp.SendAsync(request, cts.Token);
-            response.EnsureSuccessStatusCode();
-            var created = await response.Content.ReadFromJsonAsync<DevToolsListEntry>(cancellationToken: cts.Token)
-                         ?? throw new InvalidOperationException("Chrome DevTools HTTP /json/new returned no target.");
-            return MapDevToolsEntryToTab(created, 0);
-        }
-
         private static async Task ActivateTabViaDevToolsHttpAsync(string targetId)
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             using var request = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:9222/json/activate/{targetId}");
-            using var response = await DevToolsHttp.SendAsync(request, cts.Token);
-            response.EnsureSuccessStatusCode();
-        }
-
-        private static async Task CloseTabViaDevToolsHttpAsync(string targetId)
-        {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            using var request = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:9222/json/close/{targetId}");
             using var response = await DevToolsHttp.SendAsync(request, cts.Token);
             response.EnsureSuccessStatusCode();
         }
@@ -945,7 +954,7 @@ namespace OpenClaw.Node.Services
             return page;
         }
 
-        private static async Task<JsonElement> SendCdpCommandAsync(ClientWebSocket ws, int id, string method, object @params, CancellationToken cancellationToken)
+        internal static async Task<JsonElement> SendCdpCommandAsync(ClientWebSocket ws, int id, string method, object @params, CancellationToken cancellationToken)
         {
             var payload = JsonSerializer.Serialize(new { id, method, @params });
             var bytes = Encoding.UTF8.GetBytes(payload);
@@ -963,6 +972,8 @@ namespace OpenClaw.Node.Services
                     {
                         throw new InvalidOperationException("DevTools websocket closed unexpectedly.");
                     }
+                    if (ms.Length + result.Count > Constants.DefaultMaximumFrameBytes)
+                        throw new InvalidOperationException("DevTools response exceeded the maximum frame size");
                     ms.Write(buffer, 0, result.Count);
                 } while (!result.EndOfMessage);
 
@@ -988,27 +999,6 @@ namespace OpenClaw.Node.Services
                 Url = t.Url ?? string.Empty,
                 Type = t.Type ?? "page",
             };
-        }
-
-        private static async Task<string?> TryGetPageTitleAsync(ChromeMcpSession session, int pageId, CancellationToken cancellationToken)
-        {
-            try
-            {
-                await session.CallToolAsync("select_page", new Dictionary<string, object?>
-                {
-                    ["pageId"] = pageId,
-                    ["bringToFront"] = false,
-                }, cancellationToken);
-                var eval = await session.CallToolAsync("evaluate_script", new Dictionary<string, object?>
-                {
-                    ["function"] = "() => document.title || ''",
-                }, cancellationToken);
-                return ExtractStringResult(eval);
-            }
-            catch
-            {
-                return null;
-            }
         }
 
         private static List<ChromeMcpPage> ExtractPages(CallToolResult result)
@@ -1535,14 +1525,18 @@ namespace OpenClaw.Node.Services
     {
         private const int InitializeTimeoutMs = 60000;
         private readonly string _profileName;
+        private readonly Uri _browserEndpoint;
+        internal string BrowserFingerprint { get; }
         private McpClient? _client;
         private StdioClientTransport? _transport;
         private bool _initialized;
         private readonly ConcurrentQueue<string> _stderrTail = new();
 
-        public ChromeMcpSession(string profileName)
+        public ChromeMcpSession(string profileName, Uri browserEndpoint, string browserFingerprint)
         {
             _profileName = profileName;
+            _browserEndpoint = browserEndpoint;
+            BrowserFingerprint = browserFingerprint;
         }
 
         public bool IsFaulted => _client == null || _client.Completion.IsCompleted;
@@ -1564,11 +1558,9 @@ namespace OpenClaw.Node.Services
 
             try
             {
-                phase = "managed-browser-ready";
+                phase = "attach-existing-browser";
                 BrowserLog.Info(_profileName, $"initialize phase start timeoutMs={InitializeTimeoutMs}");
-                await ManagedBrowserHost.EnsureReadyAsync(_profileName, initToken);
-                var browserState = ManagedBrowserHost.GetLastState();
-                BrowserLog.Info(_profileName, $"managed browser ready launchMode={browserState?.LaunchMode ?? "unknown"} browser={browserState?.BrowserName ?? "unknown"} pid={browserState?.ProcessId?.ToString() ?? "null"} url={browserState?.BrowserUrl ?? BundledBrowserRuntimeLocator.DefaultBrowserUrl}");
+                BrowserLog.Info(_profileName, $"attaching MCP to existing browser at {_browserEndpoint}");
 
                 phase = "runtime-locate";
                 var runtime = BundledBrowserRuntimeLocator.Locate();
@@ -1585,9 +1577,14 @@ namespace OpenClaw.Node.Services
                     {
                         runtime.McpEntrypointPath,
                         "--browserUrl",
-                        runtime.BrowserUrl,
+                        _browserEndpoint.ToString().TrimEnd('/'),
                         "--experimentalStructuredContent",
-                        "--experimental-page-id-routing"
+                        "--pageIdRouting",
+                        "--filesystemRoot", Path.GetTempPath(),
+                        "--filesystemRoot", UploadStagingService.DefaultRoot,
+                        "--usageStatistics=false",
+                        "--performanceCrux=false",
+                        "--categoryExperimentalThirdParty=false"
                     },
                     EnvironmentVariables = ChildProcessSecurity.SensitiveEnvironmentRemovals(),
                     StandardErrorLines = line =>

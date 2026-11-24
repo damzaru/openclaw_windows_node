@@ -18,11 +18,11 @@ namespace OpenClaw.Node.Tray
 
         public event Action<TrayStatusSnapshot>? OnStatusChanged;
 
-        public void Set(NodeRuntimeState state, string message, int pendingPairs = 0, long? lastReconnectMs = null, string onboardingStatus = "Onboarding: Ready")
+        public void Set(NodeRuntimeState state, string message, int pendingPairs = 0, long? lastReconnectMs = null, string onboardingStatus = "Onboarding: Ready", string? gatewayVersion = null)
         {
             if (string.IsNullOrWhiteSpace(message)) message = state.ToString();
             if (string.IsNullOrWhiteSpace(onboardingStatus)) onboardingStatus = "Onboarding: Ready";
-            Current = new TrayStatusSnapshot(state, message, _clock(), pendingPairs, lastReconnectMs, onboardingStatus, _buildVersion);
+            Current = new TrayStatusSnapshot(state, message, _clock(), pendingPairs, lastReconnectMs, onboardingStatus, _buildVersion, gatewayVersion);
             OnStatusChanged?.Invoke(Current);
         }
     }

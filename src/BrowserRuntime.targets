@@ -1,0 +1,12 @@
+<Project>
+  <!-- npm tarballs use normalized old timestamps. A runtime upgrade must not
+       retain newer-dated files from the previous package. Never remove profiles. -->
+  <Target Name="ClearVendoredBrowserOutput" BeforeTargets="PrepareForBuild" Condition="'$(TargetFramework)' != ''">
+    <PropertyGroup>
+      <BrowserRuntimeOutputRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/$(OutputPath)runtimes/browser'))</BrowserRuntimeOutputRoot>
+      <BrowserRuntimeProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/'))</BrowserRuntimeProjectRoot>
+    </PropertyGroup>
+    <Error Condition="!$([System.String]::Copy('$(BrowserRuntimeOutputRoot)').StartsWith('$(BrowserRuntimeProjectRoot)'))" Text="Refusing to clean browser payloads outside the project output tree." />
+    <RemoveDir Directories="$(BrowserRuntimeOutputRoot)/chrome-devtools-mcp;$(BrowserRuntimeOutputRoot)/node" />
+  </Target>
+</Project>

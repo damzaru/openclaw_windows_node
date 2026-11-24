@@ -9,5 +9,6 @@ namespace OpenClaw.Node.Tray
         int PendingPairs = 0,
         long? LastReconnectMs = null,
         string OnboardingStatus = "Onboarding: Ready",
-        string BuildVersion = "unknown");
+        string BuildVersion = "unknown",
+        string? GatewayVersion = null);
 }

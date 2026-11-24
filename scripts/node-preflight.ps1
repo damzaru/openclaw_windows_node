@@ -12,17 +12,15 @@ if ([string]::IsNullOrWhiteSpace($RepoPath)) {
 }
 
 $repoPathFull = (Resolve-Path $RepoPath).Path
-$buildInfoPath = Join-Path $repoPathFull "src\OpenClaw.Node\BuildInfo.cs"
+$buildInfoPath = Join-Path $repoPathFull "src\OpenClaw.Node\Version.props"
 $buildExePath = Join-Path $repoPathFull "src\OpenClaw.Node\bin\$Platform\$Configuration\$TargetFramework\OpenClaw.Node.exe"
 $watchdogScript = Join-Path $repoPathFull "scripts\node-watchdog.ps1"
 
 function Get-BuildLabel {
   param([string]$Path)
   if (-not (Test-Path $Path)) { return $null }
-  $content = Get-Content $Path -Raw
-  $match = [regex]::Match($content, 'BuildVersion\s*=\s*"(?<label>b\d{4})"')
-  if ($match.Success) { return $match.Groups['label'].Value }
-  return $null
+  [xml]$metadata = Get-Content -LiteralPath $Path -Raw
+  return [string]$metadata.Project.PropertyGroup.GatewayVersion
 }
 
 function Get-ProcessHash {
@@ -60,6 +58,10 @@ if ($buildExists) {
 $result = [pscustomobject]@{
   repoPath = $repoPathFull
   sourceBuildLabel = Get-BuildLabel -Path $buildInfoPath
+  gatewaySourceVersion = ([xml](Get-Content -LiteralPath $buildInfoPath -Raw)).Project.PropertyGroup.GatewaySourceVersion
+  companionRevision = ([xml](Get-Content -LiteralPath $buildInfoPath -Raw)).Project.PropertyGroup.CompanionRevision
+  gatewaySourceCommit = ([xml](Get-Content -LiteralPath $buildInfoPath -Raw)).Project.PropertyGroup.GatewaySourceCommit
+  gatewaySyncDate = ([xml](Get-Content -LiteralPath $buildInfoPath -Raw)).Project.PropertyGroup.GatewaySyncDate
   buildInfoPath = $buildInfoPath
   canonicalBuildExePath = $buildExePath
   canonicalBuildExists = $buildExists
