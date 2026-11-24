@@ -1,10 +1,11 @@
 # Run from the root of a clean Windows checkout. Never package a running installation.
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName='Installer')]
 param(
-    [Parameter(Mandatory)][ValidatePattern('^1\.0\.[1-9][0-9]*$')][string]$Version,
-    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$')][string]$Repository,
+    [Parameter(Mandatory, ParameterSetName='Installer')][ValidatePattern('^1\.0\.[1-9][0-9]*$')][string]$Version,
+    [Parameter(Mandatory, ParameterSetName='Installer')][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$')][string]$Repository,
     [Parameter(Mandatory)][string]$Stage,
-    [Parameter(Mandatory)][string]$Vpk
+    [Parameter(Mandatory, ParameterSetName='Installer')][string]$Vpk,
+    [Parameter(Mandatory, ParameterSetName='Portable')][switch]$PublishOnly
 )
 $ErrorActionPreference = 'Stop'
 $Stage = [IO.Path]::GetFullPath($Stage)
@@ -31,6 +32,7 @@ foreach ($file in (Get-ChildItem -LiteralPath $publish -Recurse -Force)) {
     }
 }
 if ((Get-FileHash (Join-Path $publish 'runtimes/browser/node/node.exe')).Hash -ne $pin.nodeWinX64Sha256) { throw 'Published runtime is missing or invalid.' }
+if ($PSCmdlet.ParameterSetName -eq 'Portable') { return }
 & $Vpk pack --packId OpenClawCompanion --packTitle 'OpenClaw Companion' --packAuthors 'Companion Maintainers' --packVersion $Version --packDir $publish --mainExe OpenClaw.Node.exe --icon src/OpenClaw.Node/Tray/Assets/openclaw-claw.ico --channel win --runtime win-x64 --delta None --noPortable --instLocation PerUser --shortcuts StartMenuRoot --outputDir $release
 if ($LASTEXITCODE) { throw 'Installer packaging failed.' }
 $feed = Get-Content -Raw (Join-Path $release 'releases.win.json') | ConvertFrom-Json

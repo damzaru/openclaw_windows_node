@@ -253,6 +253,18 @@ Develop and test on `dev` or a feature branch. Merge into `main` only after the 
 
 From a clean checkout, run `.\scripts\build-dev.ps1` to build and start `dev`, or pass `-Branch feature/my-change` to select another remote branch. Add `-BuildOnly` if the installed companion is running and should stay running. See the [development build guide](scripts/README.md) for details.
 
+### Download a Windows build from CI
+
+You can develop on Linux without cross-compiling the tray. Push to `dev`, or open/update a pull request. **Windows dev build** uses a hosted Windows runner to build self-contained `win-x64`, run the unit tests, and smoke-test the packaged executable. For a push it builds the pushed commit; for a PR it builds the **PR head**, not the temporary merge commit. Live Gateway and interactive desktop checks are separate.
+
+1. While signed in to GitHub, open the commit's **Checks** (or the PR's **Checks** tab) and follow the **Windows dev build** run. You can also find it under the repository's **Actions** tab.
+2. Open the successful run's **Summary** and download the ZIP from **Artifacts**. Its name is `companion-win-x64-<full-commit-sha>-<run-id>-<attempt>`; artifacts are retained for 14 days. The build job's summary also links the ZIP and records its SHA-256.
+3. Extract the **entire** ZIP into a new folder outside your installation. Check `commit` in `build-info.json` against the commit you intended to test. From the extracted folder, `.\OpenClaw.Node.exe --version` is a smoke check; `.\OpenClaw.Node.exe --tray` starts the test app. No SDK or Git checkout is needed on the test PC.
+
+This is a portable **test build**, not an installer or a tray update. Only run code you trust on a paired Windows account: the test app uses that account's settings and credentials. Exit the installed tray before launching the test tray, leave startup settings alone, then exit the test tray and reopen **OpenClaw Companion** from Start when finished. Use a disposable Windows VM and test credentials for untrusted PRs. The CI job does not create tags or releases, sign updates, or change the installer feed.
+
+### Build and test locally
+
 Restore and run the full test suite:
 
 ```powershell

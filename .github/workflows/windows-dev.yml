@@ -1,0 +1,66 @@
+name: Windows dev build
+on:
+  push:
+    branches: [dev]
+  pull_request:
+
+# Ordinary PR context, hosted runner, no secrets or release/signing permissions.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BUILD_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Publish the exact Windows x64 commit to a clean directory
+        run: |
+          $head = git rev-parse --verify HEAD
+          if ($LASTEXITCODE -or $head -cne $env:BUILD_SHA) { throw 'Unexpected checkout SHA.' }
+          ./.github/release/pack.ps1 -PublishOnly -Stage "$env:RUNNER_TEMP/companion-dev"
+      - name: Run unit tests
+        run: dotnet test src/OpenClaw.Node.Tests -c Release -p:Platform=x64 --filter 'FullyQualifiedName!~RealGatewayIntegrationTests'
+      - name: Smoke-test the published binary and record its provenance
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'companion-dev/publish'
+          $exe = Join-Path $out 'OpenClaw.Node.exe'
+          $version = (& $exe --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^OpenClaw Windows Companion \S+$') { throw 'Published executable failed its version check.' }
+          if (!(Test-Path -LiteralPath "$out/runtimes/browser/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js" -PathType Leaf)) { throw 'Missing browser helper.' }
+          [ordered]@{
+            commit = $env:BUILD_SHA
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            runtime = 'win-x64'
+            version = $version
+          } | ConvertTo-Json | Set-Content -LiteralPath "$out/build-info.json" -Encoding utf8
+      - name: Upload portable ZIP
+        id: artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: companion-win-x64-${{ env.BUILD_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/companion-dev/publish/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Link the verified build in the run summary
+        env:
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+        run: |
+          "Windows x64 commit: $env:BUILD_SHA" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "[Download portable ZIP]($env:ARTIFACT_URL) — SHA-256: $env:ARTIFACT_DIGEST" >> $env:GITHUB_STEP_SUMMARY
