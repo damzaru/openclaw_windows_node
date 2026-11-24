@@ -14,6 +14,9 @@
 *.snupkg
 
 # Local runtime/log artifacts
+# Per-checkout agent instructions can contain private paths and preferences.
+/AGENTS.md
+/.codex/
 node-watchdog-child.log
 node-watchdog-child.err.log
 *.tmp
