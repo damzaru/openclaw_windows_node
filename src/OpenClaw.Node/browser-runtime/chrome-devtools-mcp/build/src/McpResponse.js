@@ -1249,6 +1249,7 @@ function createStructuredPage(mcpPage, context, rawTitle) {
     const title = truncateTitle(rawTitle);
     const entry = {
         id: mcpPage.id,
+        targetId: mcpPage.targetId,
         url: mcpPage.url(),
         title,
         selected: context.isPageSelected(mcpPage),

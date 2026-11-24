@@ -159,6 +159,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\node-reload.ps1 -R
 - fetches pinned `chrome-devtools-mcp` package tarball
 - installs production dependencies
 - writes `src/OpenClaw.Node/browser-runtime/versions.json`
+- applies the companion's `windows-capture.patch` after the Gateway patch. These hooks expose native target IDs and dispatch screenshots to `companion-screenshot.mjs`, which lives outside the replaced npm directory.
 
 ### Default pinned versions
 - Node: `v24.14.0`

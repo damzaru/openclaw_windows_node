@@ -242,15 +242,14 @@ namespace OpenClaw.Node
                 var message = failure.DeviceTokenRetryPending ? "Retrying with stored device credentials" : failure.Error.Message;
                 SetTray(failure.ReconnectPaused ? NodeRuntimeState.Disconnected : NodeRuntimeState.Reconnecting, message);
                 Console.Error.WriteLine($"[Gateway] Connect failure detail={code} paused={failure.ReconnectPaused} deviceTokenRetryPending={failure.DeviceTokenRetryPending}: {failure.Error.Message}");
-                if (!string.IsNullOrWhiteSpace(hint)) Console.Error.WriteLine("[Gateway] Remediation: " + hint);
+                var guidance = OnboardingAdvisor.ConnectionRemediation(code, failure.ReconnectPaused, hint);
+                if (pairing || !string.IsNullOrWhiteSpace(hint)) Console.Error.WriteLine("[Gateway] Remediation: " + guidance);
                 if (diagnostic && !failure.DeviceTokenRetryPending) { Environment.ExitCode = 2; cts.Cancel(); return; }
                 if (!trayEnabled || !failure.ReconnectPaused || authDialogShown) return;
                 authDialogShown = true;
                 ShowUserWarningDialog(
                     pairing ? "OpenClaw Pairing Required" : "OpenClaw Connection Requires Attention",
-                    failure.Error.Message + "\n\n" + (hint ?? (pairing
-                        ? "Review this device and its requested commands in the Gateway pending pairing requests, then restart the companion."
-                        : "Review the Gateway authentication requirements and companion connection settings, then restart the companion.")));
+                    failure.Error.Message + "\n\n" + guidance);
             };
             connection.OnConnectRejected += errorText => Console.WriteLine($"[connect] {errorText}");
             if (operatorConnection != null)

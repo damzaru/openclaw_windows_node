@@ -6,6 +6,18 @@ namespace OpenClaw.Node.Tray
 
     public static class OnboardingAdvisor
     {
+        internal static string ConnectionRemediation(string code, bool reconnectPaused, string? serverHint)
+        {
+            if (!code.StartsWith("PAIRING_", StringComparison.Ordinal))
+                return !string.IsNullOrWhiteSpace(serverHint) ? serverHint.Trim() : "Review the Gateway authentication requirements and companion connection settings, then restart the companion.";
+            const string devices = "Gateway Control UI > Settings > Devices";
+            var guidance = code is "PAIRING_EXPIRED" or "PAIRING_REJECTED"
+                ? $"This request is no longer pending. If this PC should connect, restart the companion to request pairing again and review the new request in {devices}."
+                : $"Review this PC's pending request in {devices} and approve it there if expected. " +
+                  (reconnectPaused ? "Then restart the companion." : "The companion will retry automatically.");
+            return string.IsNullOrWhiteSpace(serverHint) ? guidance : guidance + "\n\n" + serverHint.Trim();
+        }
+
         public static OnboardingAssessment Evaluate(string gatewayUrl, string gatewayToken, bool hasStoredDeviceToken = false)
         {
             if (string.IsNullOrWhiteSpace(gatewayToken) && !hasStoredDeviceToken)

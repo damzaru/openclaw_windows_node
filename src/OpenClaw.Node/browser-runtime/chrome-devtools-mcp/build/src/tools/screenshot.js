@@ -167,6 +167,8 @@ export const screenshot = definePageTool((args) => {
             readOnlyHint: false,
         },
         schema: {
+            companionTarget: zod.string().optional(),
+            labels: zod.boolean().optional(),
             format: zod
                 .enum(['png', 'jpeg', 'webp'])
                 .default(defaultFormat)
@@ -196,6 +198,10 @@ export const screenshot = definePageTool((args) => {
             filePath: true,
         },
         handler: async (request, response, context) => {
+            if (request.params.companionTarget) {
+                const { captureCompanionTab } = await import('../../../../companion-screenshot.mjs');
+                return await captureCompanionTab(request.page, request.params, response);
+            }
             const env_1 = { stack: [], error: void 0, hasError: false };
             try {
                 if (request.params.uid && request.params.fullPage) {

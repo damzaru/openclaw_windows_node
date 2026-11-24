@@ -134,6 +134,86 @@ public sealed class BrowserRuntimeIntegrationTests
         Assert.Contains(tabs, tab => tab.TargetId == startup.TargetId && tab.Url == userUrl);
     }
 
+    [BrowserRuntimeFact]
+    public async Task ScreenshotsCaptureTheHiddenTargetWithoutFocusingItOrItsSameUrlSibling()
+    {
+        await using var fixture = await RuntimeFixture.StartAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var ct = deadline.Token;
+        var cdp = new BrowserCdpClient(fixture.BrowserEndpoint);
+        cdp.RegisterStartupTab(fixture.StartupTab);
+        var url = new Uri(fixture.WebEndpoint, "one").ToString();
+        var background = await cdp.OpenTabAsync("user", url, ct);
+        var foreground = await cdp.OpenTabAsync("user", url, ct);
+        using var backend = new ChromeMcpBrowserBackend(cdp);
+        var proxy = new BrowserProxyService(backend);
+        using var http = new HttpClient();
+        await http.GetStringAsync(new Uri(fixture.BrowserEndpoint, "json/activate/" + foreground.TargetId), ct);
+        async Task<JsonElement> Eval(string target, string expression)
+        {
+            using var ws = new System.Net.WebSockets.ClientWebSocket();
+            await ws.ConnectAsync(new Uri($"ws://127.0.0.1:{fixture.BrowserEndpoint.Port}/devtools/page/{target}"), ct);
+            var result = await ChromeMcpBrowserBackend.SendCdpCommandAsync(ws, 1, "Runtime.evaluate", new { expression, returnByValue = true, awaitPromise = true }, ct);
+            return result.GetProperty("result").GetProperty("value");
+        }
+        async Task<JsonElement> Capture(object body)
+        {
+            using var doc = JsonDocument.Parse(await proxy.ProxyAsync(new() { Method = "POST", Path = "/screenshot", Body = JsonSerializer.SerializeToElement(body) }, ct));
+            return doc.RootElement.Clone();
+        }
+        static byte[] Bytes(JsonElement response) => Convert.FromBase64String(response.GetProperty("files")[0].GetProperty("base64").GetString()!);
+        static int Dimension(byte[] png, int offset) => System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(offset, 4));
+        var targetId = background.TargetId;
+        await Eval(foreground.TargetId, "window.hiddenEvents=0; document.addEventListener('visibilitychange',()=>{if(document.hidden)hiddenEvents++}); true");
+        async Task CheckForeground(string step)
+        {
+            var active = (await Eval(foreground.TargetId, "[document.visibilityState,document.hasFocus(),window.hiddenEvents].join(',')")).GetString();
+            var other = (await Eval(targetId, "[document.visibilityState,document.hasFocus(),window.visibleEvents].join(',')")).GetString();
+            Assert.True(active == "visible,true,0" && other == "hidden,false,0", $"{step}: foreground {active}, background {other}");
+        }
+        Assert.Equal("hidden", (await Eval(targetId, """
+            document.body.style.minHeight='1600px';
+            document.querySelector('button').style.cssText='width:123px;height:47px';
+            window.visibleEvents=0; document.addEventListener('visibilitychange',()=>{if(!document.hidden)visibleEvents++});
+            document.visibilityState
+            """)).GetString());
+        var viewport = Bytes(await Capture(new { targetId }));
+        await CheckForeground("viewport");
+        var full = Bytes(await Capture(new { targetId, fullPage = true }));
+        Assert.True(Dimension(full, 20) > Dimension(viewport, 20));
+        var snapshot = await backend.SnapshotAsync("user", targetId, ct);
+        await CheckForeground("snapshot");
+        var reference = Ref(snapshot, "button", "Apply");
+        var plain = Bytes(await Capture(new { targetId, @ref = reference }));
+        var marked = await Capture(new { targetId, @ref = reference, labels = true });
+        await CheckForeground("element");
+        Assert.Equal(123, Dimension(plain, 16));
+        Assert.Equal(47, Dimension(plain, 20));
+        Assert.Equal(123, Dimension(Bytes(marked), 16));
+        var imageData = marked.GetProperty("files")[0].GetProperty("base64").GetString();
+        // Verify a badge pixel in the returned file; a re-encoded but unlabeled PNG is not enough.
+        var badge = await Eval(targetId, $$"""
+            (async () => {
+                const b = Uint8Array.from(atob('{{imageData}}'), c => c.charCodeAt(0));
+                const img = await createImageBitmap(new Blob([b], {type:'image/png'}));
+                const ctx = new OffscreenCanvas(1,1).getContext('2d');
+                ctx.drawImage(img,-1,-1);
+                return Array.from(ctx.getImageData(0,0,1,1).data).join(',');
+            })()
+            """);
+        Assert.Equal("166,44,0,255", badge.GetString());
+        Assert.Equal(1, marked.GetProperty("result").GetProperty("labelsCount").GetInt32());
+        var page = await Capture(new { targetId, labels = true, type = "jpeg" });
+        Assert.True(page.GetProperty("result").GetProperty("labelsCount").GetInt32() > 1);
+        Assert.Equal("image/jpeg", page.GetProperty("files")[0].GetProperty("mimeType").GetString());
+        Assert.Equal(new byte[] { 0xff, 0xd8 }, Bytes(page)[..2]);
+        Assert.Equal(400, (await Assert.ThrowsAsync<BrowserRouteException>(() => Capture(new { targetId, element = "button" }))).Status);
+        Assert.Equal(400, (await Assert.ThrowsAsync<BrowserRouteException>(() => Capture(new { targetId, fullPage = true, @ref = reference }))).Status);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Capture(new { targetId, @ref = "missing" }));
+        Assert.Equal(0, (await Eval(targetId, "window.visibleEvents")).GetInt32());
+        Assert.Equal("visible", (await Eval(foreground.TargetId, "document.visibilityState")).GetString());
+    }
+
     private static string Ref(string snapshot, string role, string name)
     {
         var line = snapshot.Split('\n').SingleOrDefault(value => value.Contains(role + " \"" + name + "\"", StringComparison.Ordinal));

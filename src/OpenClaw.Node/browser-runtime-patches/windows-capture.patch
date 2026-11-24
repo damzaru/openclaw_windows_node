@@ -1,0 +1,47 @@
+diff --git a/build/src/ToolHandler.js b/build/src/ToolHandler.js
+--- a/build/src/ToolHandler.js
++++ b/build/src/ToolHandler.js
+@@ -344,7 +344,8 @@
+                     pageId !== undefined
+                         ? context.getPageById(pageId)
+                         : context.getSelectedMcpPage();
+-                await page?.init({ emulateFocus: true });
++                const capture = tool.name === 'take_screenshot' || tool.name === 'take_snapshot';
++                await page?.init({ emulateFocus: !capture });
+                 response.setPage(page);
+                 if (tool.blockedByDialog) {
+                     page.throwIfDialogOpen();
+diff --git a/build/src/McpResponse.js b/build/src/McpResponse.js
+--- a/build/src/McpResponse.js
++++ b/build/src/McpResponse.js
+@@ -1250,6 +1250,7 @@ function createStructuredPage(mcpPage, context, rawTitle) {
+     const title = truncateTitle(rawTitle);
+     const entry = {
+         id: mcpPage.id,
++        targetId: mcpPage.targetId,
+         url: mcpPage.url(),
+         title,
+         selected: context.isPageSelected(mcpPage),
+diff --git a/build/src/tools/screenshot.js b/build/src/tools/screenshot.js
+--- a/build/src/tools/screenshot.js
++++ b/build/src/tools/screenshot.js
+@@ -166,6 +166,8 @@ export const screenshot = definePageTool((args) => {
+             readOnlyHint: false,
+         },
+         schema: {
++            companionTarget: zod.string().optional(),
++            labels: zod.boolean().optional(),
+             format: zod
+                 .enum(['png', 'jpeg', 'webp'])
+                 .default(defaultFormat)
+@@ -197,6 +199,10 @@ export const screenshot = definePageTool((args) => {
+             filePath: true,
+         },
+         handler: async (request, response, context) => {
++            if (request.params.companionTarget) {
++                const { captureCompanionTab } = await import('../../../../companion-screenshot.mjs');
++                return await captureCompanionTab(request.page, request.params, response);
++            }
+             const env_1 = { stack: [], error: void 0, hasError: false };
+             try {
+                 if (request.params.uid && request.params.fullPage) {

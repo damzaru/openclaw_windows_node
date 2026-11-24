@@ -39,6 +39,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Gateway snapshot patch does not apply to the pinned MCP artifact.' }
   git -C $package apply $patchSource
   if ($LASTEXITCODE -ne 0) { throw 'Could not apply Gateway snapshot patch.' }
+  git -C $package apply (Join-Path $repo 'src\OpenClaw.Node\browser-runtime-patches\windows-capture.patch')
+  if ($LASTEXITCODE -ne 0) { throw 'Could not apply companion capture hooks.' }
   Push-Location $package
   try {
     npm install --omit=dev --ignore-scripts --no-audit --no-fund

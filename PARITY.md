@@ -1,8 +1,11 @@
-# Gateway compatibility audit — 2026-11-17
+# Gateway compatibility — 2026-11-24
 
-Current reference: Gateway **2026.11.4**, master `40437fa488611208ec5299823a3d76d84312464e`. This targeted sync leaves Gateway source/configuration untouched.
+Current reference: Gateway **2026.11.8**, master `92d4728c1f9be71cd96918619d3777368bbda257`. This targeted sync leaves Gateway source/configuration untouched.
 
-## Profile/cache and version follow-up
+- Browser screenshots bind to the native tab ID, including when two tabs have identical URLs. Background captures do not activate tabs. Viewport, full-page, snapshot-ref and labeled captures return bounded PNG/JPEG files. Use a snapshot ref for an element; the existing-session driver does not accept CSS selectors.
+- Pairing and permission-upgrade failures direct the user to the Gateway Control UI under **Settings > Devices**. Approval remains on the Gateway.
+
+## 2026-11-17: Profile/cache and version follow-up
 
 - App/product/Gateway-client version is plain **2026.11.5**, matching the installed Gateway, with a single `Version: 2026.11.5` tray row. Reference source provenance and internal build details are diagnostics-only. The reference checkout still declares 2026.11.4; no newer commit is claimed or substituted.
 - Browser profiles now live under `%LOCALAPPDATA%\OpenClaw Companion\browser\managed-profile`, outside executable/build payloads. Migration is offline, atomic on the same volume and refuses nonempty destination conflicts or unrecognized source directories.

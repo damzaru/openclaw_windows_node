@@ -344,7 +344,8 @@ export class ToolHandler {
                     pageId !== undefined
                         ? context.getPageById(pageId)
                         : context.getSelectedMcpPage();
-                await page?.init({ emulateFocus: true });
+                const capture = tool.name === 'take_screenshot' || tool.name === 'take_snapshot';
+                await page?.init({ emulateFocus: !capture });
                 response.setPage(page);
                 if (tool.blockedByDialog) {
                     page.throwIfDialogOpen();

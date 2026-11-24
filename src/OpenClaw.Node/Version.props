@@ -1,10 +1,10 @@
 <Project>
   <PropertyGroup>
     <!-- Sync these fields from the read-only Gateway checkout with scripts/bump-build.ps1. -->
-    <GatewayVersion>2026.11.5</GatewayVersion>
-    <GatewaySourceVersion>2026.11.4</GatewaySourceVersion>
-    <GatewaySourceCommit>40437fa488611208ec5299823a3d76d84312464e</GatewaySourceCommit>
-    <GatewaySyncDate>2026-11-17</GatewaySyncDate>
+    <GatewayVersion>2026.11.8</GatewayVersion>
+    <GatewaySourceVersion>2026.11.8</GatewaySourceVersion>
+    <GatewaySourceCommit>92d4728c1f9be71cd96918619d3777368bbda257</GatewaySourceCommit>
+    <GatewaySyncDate>2026-11-24</GatewaySyncDate>
     <CompanionRevision>0</CompanionRevision>
     <GatewayNumericVersion>$([System.Text.RegularExpressions.Regex]::Match('$(GatewayVersion)', '^\d+\.\d+\.\d+').Value)</GatewayNumericVersion>
     <Version>$(GatewayVersion)</Version>

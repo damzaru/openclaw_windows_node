@@ -70,6 +70,8 @@ namespace OpenClaw.Node.Services
         public bool IsRemote { get; set; }
     }
 
+    internal sealed record BrowserScreenshot(string Url, string Base64, int? LabelsCount, int? LabelsSkipped, bool? Truncated);
+
     internal interface IBrowserBackend
     {
         Task EnsureAvailableAsync(string profileName, CancellationToken cancellationToken);
@@ -88,6 +90,8 @@ namespace OpenClaw.Node.Services
         string? GetLastError(string profileName);
         Task<string> SnapshotAsync(string profileName, string targetId, CancellationToken cancellationToken)
             => throw new InvalidOperationException("Browser snapshots are not available from this backend");
+        Task<BrowserScreenshot> ScreenshotAsync(string profile, string target, string type, bool fullPage, string? reference, bool labels, CancellationToken ct)
+            => throw new BrowserRouteException(501, "Screenshots are not available from this backend");
         Task ActAsync(string profileName, string targetId, string kind, JsonElement body, CancellationToken cancellationToken)
             => throw new InvalidOperationException("Browser input is not available from this backend");
         Task UploadAsync(string profileName, string targetId, string uid, string[] paths, CancellationToken cancellationToken)
@@ -422,9 +426,14 @@ namespace OpenClaw.Node.Services
             var targetId = RequireString(body, "targetId");
             var type = string.Equals(TryGetString(body, "type"), "jpeg", StringComparison.OrdinalIgnoreCase) ? "jpeg" : "png";
             var fullPage = TryGetBool(body, "fullPage") ?? false;
-            var screenshot = await ChromeMcpBrowserBackend.CaptureScreenshotViaDevToolsWebSocketAsync(targetId, fullPage, type, cancellationToken);
-            var tabs = await _backend.ListTabsAsync(profile, cancellationToken);
-            var found = tabs.FirstOrDefault(t => string.Equals(t.TargetId, targetId, StringComparison.OrdinalIgnoreCase));
+            var reference = TryGetString(body, "ref");
+            if (string.IsNullOrWhiteSpace(reference)) reference = null;
+            if (!string.IsNullOrWhiteSpace(TryGetString(body, "element")))
+                throw new BrowserRouteException(400, "CSS element selectors are not supported in existing sessions; use a snapshot ref.");
+            if (fullPage && reference != null)
+                throw new BrowserRouteException(400, "fullPage is not supported for element screenshots.");
+            var labels = TryGetBool(body, "labels") ?? false;
+            var screenshot = await _backend.ScreenshotAsync(profile, targetId, type, fullPage, reference, labels, cancellationToken);
             var fileName = $"browser-screenshot-{targetId}.{(type == "jpeg" ? "jpg" : "png")}";
             return new
             {
@@ -433,14 +442,18 @@ namespace OpenClaw.Node.Services
                     ok = true,
                     path = fileName,
                     targetId,
-                    url = found?.Url ?? string.Empty,
+                    url = screenshot.Url,
+                    labels = labels ? true : (bool?)null,
+                    labelsCount = screenshot.LabelsCount,
+                    labelsSkipped = screenshot.LabelsSkipped,
+                    truncated = screenshot.Truncated,
                 },
                 files = new[]
                 {
                     new
                     {
                         path = fileName,
-                        base64 = Convert.ToBase64String(screenshot),
+                        base64 = screenshot.Base64,
                         mimeType = type == "jpeg" ? "image/jpeg" : "image/png",
                     }
                 }
@@ -562,11 +575,9 @@ namespace OpenClaw.Node.Services
                 var native = await _cdp.GetTargetAsync(targetId, cancellationToken);
                 var session = await GetSessionAsync(profileName, cancellationToken);
                 var pages = ExtractPages(await session.CallToolAsync("list_pages", new(), cancellationToken));
-                var matches = pages.Where(page => page.Url == native.Url).ToArray();
-                if (matches.Length != 1)
-                    throw new InvalidOperationException("Browser target is ambiguous in the attached runtime; use a tab with a unique URL before this action");
-                // Never infer MCP page identity from DevTools list order.
-                args["pageId"] = matches[0].Id;
+                var page = pages.SingleOrDefault(page => page.TargetId == native.Id)
+                    ?? throw new BrowserRouteException(404, "Browser target is no longer attached.");
+                args["pageId"] = page.Id;
                 return await session.CallToolAsync(tool, args, cancellationToken);
             }
             finally { _pageOperationGate.Release(); }
@@ -867,27 +878,23 @@ namespace OpenClaw.Node.Services
             return null;
         }
 
-        internal static async Task<byte[]> CaptureScreenshotViaDevToolsWebSocketAsync(string targetId, bool fullPage, string type, CancellationToken cancellationToken)
+        public async Task<BrowserScreenshot> ScreenshotAsync(string profile, string target, string type, bool fullPage, string? reference, bool labels, CancellationToken ct)
         {
-            var target = await GetDevToolsTargetAsync(targetId, cancellationToken);
-            using var ws = new ClientWebSocket();
-            await ws.ConnectAsync(new Uri(target.WebSocketDebuggerUrl!), cancellationToken);
-            if (fullPage)
+            var args = new Dictionary<string, object?>
             {
-                await SendCdpCommandAsync(ws, 1, "Page.getLayoutMetrics", new { }, cancellationToken);
-            }
-            var capture = await SendCdpCommandAsync(ws, 2, "Page.captureScreenshot", new
-            {
-                format = type,
-                captureBeyondViewport = fullPage,
-                fromSurface = true,
-            }, cancellationToken);
-            await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", cancellationToken);
-            if (capture.ValueKind == JsonValueKind.Object && capture.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == JsonValueKind.String)
-            {
-                return Convert.FromBase64String(dataEl.GetString() ?? string.Empty);
-            }
-            throw new InvalidOperationException("Page.captureScreenshot returned no data.");
+                ["companionTarget"] = target, ["format"] = type, ["labels"] = labels, ["fullPage"] = fullPage,
+            };
+            if (reference != null) args["uid"] = reference;
+            var result = await PageToolAsync(profile, target, "take_screenshot", args, ct);
+            var image = result.Content.OfType<ImageContentBlock>().Single();
+            if (image.MimeType != "image/" + type) throw new InvalidDataException("Unexpected screenshot format.");
+            var message = ExtractStructuredContent(result).GetProperty("message").GetString();
+            using var metadata = JsonDocument.Parse(message!);
+            var info = metadata.RootElement;
+            return new BrowserScreenshot(info.GetProperty("url").GetString()!, Encoding.UTF8.GetString(image.Data.Span),
+                labels ? info.GetProperty("labelsCount").GetInt32() : null,
+                labels ? info.GetProperty("labelsSkipped").GetInt32() : null,
+                labels && info.GetProperty("truncated").GetBoolean() ? true : null);
         }
 
         internal static async Task<(bool base64Encoded, string body)> GetResponseBodyViaDevToolsWebSocketAsync(string targetId, string requestId, CancellationToken cancellationToken)
@@ -1022,6 +1029,7 @@ namespace OpenClaw.Node.Services
                     pages.Add(new ChromeMcpPage
                     {
                         Id = id,
+                        TargetId = TryReadString(item, "targetId"),
                         Title = TryReadString(item, "title"),
                         Url = TryReadString(item, "url"),
                         Selected = TryReadBool(item, "selected"),
@@ -1149,6 +1157,7 @@ namespace OpenClaw.Node.Services
         private sealed class ChromeMcpPage
         {
             public int Id { get; set; }
+            public string? TargetId { get; set; }
             public string? Title { get; set; }
             public string? Url { get; set; }
             public bool Selected { get; set; }

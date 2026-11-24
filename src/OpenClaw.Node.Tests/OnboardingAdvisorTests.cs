@@ -5,6 +5,25 @@ namespace OpenClaw.Node.Tests
 {
     public class OnboardingAdvisorTests
     {
+        [Theory]
+        [InlineData(null)]
+        [InlineData("Review the requested role upgrade.")]
+        public void PairingRemediationAlwaysNamesTheGatewayDevicesPage(string? hint)
+        {
+            var guidance = OnboardingAdvisor.ConnectionRemediation("PAIRING_REQUIRED", true, hint);
+            Assert.Contains("Gateway Control UI", guidance);
+            Assert.Contains("Settings > Devices", guidance);
+            if (hint != null) Assert.Contains(hint, guidance);
+            Assert.DoesNotContain("Devices", OnboardingAdvisor.ConnectionRemediation("AUTH_REQUIRED", true, hint));
+        }
+
+        [Fact]
+        public void PairingRemediationDistinguishesWaitingFromAnExpiredRequest()
+        {
+            Assert.Contains("retry automatically", OnboardingAdvisor.ConnectionRemediation("PAIRING_REQUIRED", false, null));
+            Assert.Contains("no longer pending", OnboardingAdvisor.ConnectionRemediation("PAIRING_EXPIRED", true, null));
+        }
+
         [Fact]
         public void Evaluate_ShouldFail_WhenTokenMissing()
         {
