@@ -20,7 +20,12 @@ internal sealed class SignedReleaseSource : IUpdateSource
         Regex.IsMatch(slug, @"\A[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*\z")
             ? "https://github.com/" + slug
             : throw new InvalidDataException("This build has no valid release repository.");
-    private static string Signer => Repository + "/.github/workflows/windows-release.yml@refs/heads/main";
+    internal static void RequireReleaseWorkflow(string slug, string? verifiedSan)
+    {
+        var expected = RepositoryUrl(slug) + "/.github/workflows/windows-release.yml@refs/heads/main";
+        if (!string.Equals(expected, verifiedSan, StringComparison.Ordinal))
+            throw new InvalidDataException("Signature is not from the main-branch release workflow.");
+    }
     internal const string PackageId = "OpenClawCompanion";
     private const long PackageLimit = 512L * 1024 * 1024;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(8) };
@@ -39,9 +44,13 @@ internal sealed class SignedReleaseSource : IUpdateSource
 
     internal static async Task<VelopackAssetFeed> VerifyFeedAsync(byte[] bytes, string bundle, CancellationToken token)
     {
+        // Sigstore.Net compares its exact-match policy to the OIDC token subject.
+        // The workflow URI is a separate signed field in the verified Fulcio leaf.
+        var slug = BuildInfo.ReleaseRepository;
         var signature = await Services.Value.GetRequiredService<Verifier>().VerifyAsync(bundle, bytes,
-            VerificationPolicy.ForExact("https://token.actions.githubusercontent.com", Signer), token);
+            VerificationPolicy.ForExact("https://token.actions.githubusercontent.com", $"repo:{slug}:ref:refs/heads/main"), token);
         if (!signature.IsSuccess) throw new InvalidDataException("Release signature verification failed.");
+        RequireReleaseWorkflow(slug, signature.SignerIdentity.SubjectAlternativeNameUri);
         var result = VelopackAssetFeed.FromJson(Encoding.UTF8.GetString(bytes));
         if (result.Assets.Length != 1) throw new InvalidDataException("Expected one full Windows package.");
         Validate(result.Assets[0]);

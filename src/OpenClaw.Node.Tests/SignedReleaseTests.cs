@@ -7,6 +7,18 @@ namespace OpenClaw.Node.Tests;
 
 public class SignedReleaseTests
 {
+    [Fact]
+    public void AValidRepositorySubjectCannotSubstituteForTheWorkflowCertificateUri()
+    {
+        const string slug = "example/companion";
+        const string expected = "https://github.com/example/companion/.github/workflows/windows-release.yml@refs/heads/main";
+        SignedReleaseSource.RequireReleaseWorkflow(slug, expected);
+        foreach (var other in new[] { null, "repo:example/companion:ref:refs/heads/main",
+                 expected.Replace("windows-release", "other"), expected.Replace("heads/main", "heads/other"),
+                 expected.Replace("example/companion", "example/fork") })
+            Assert.Throws<InvalidDataException>(() => SignedReleaseSource.RequireReleaseWorkflow(slug, other));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("team/..")]
