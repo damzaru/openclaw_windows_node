@@ -124,10 +124,13 @@ internal static class CompanionLog
         {
             try
             {
-                var files = new DirectoryInfo(_directory).GetFiles("companion-*.log").OrderByDescending(file => file.LastWriteTimeUtc).ToArray();
-                foreach (var file in files.Skip(10))
+                // Reserve a slot for the current log even before its first write.
+                var olderLogs = new DirectoryInfo(_directory).GetFiles("companion-*.log")
+                    .Where(file => file.FullName != CurrentPath)
+                    .OrderByDescending(file => file.LastWriteTimeUtc);
+                foreach (var file in olderLogs.Skip(9))
                 {
-                    if (file.FullName == CurrentPath || file.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+                    if (file.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
                     try { file.Delete(); } catch (IOException) { } catch (UnauthorizedAccessException) { }
                 }
             }
