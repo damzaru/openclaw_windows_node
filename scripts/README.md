@@ -1,6 +1,8 @@
 # Companion maintenance
 
-## Update this Windows PC
+For a release installation, use the installed tray's **Check for updates...** command. The script below is only for a companion running from a Git checkout.
+
+## Update a Windows source checkout
 
 From PowerShell in the companion checkout:
 

@@ -65,7 +65,7 @@ The current protocol remains v4 (native node minimum v3), and existing device-au
 | Dynamic runtimes | Generic MCP/plugin node commands, Claude CLI/session catalogs, Codex exec-server and provider-owned interactive PTY terminals. |
 | Managed environments | `worker.*` installation/supervision, environment workspaces, cloud-worker desktops and portal streaming. These are distinct from foreground desktop control of this PC. |
 | Approval UX | Local interactive execution-approval queue and portable approval snapshots/file pinning; unsupported approval modes still fail closed. |
-| Setup and app bridges | One-paste join-code onboarding, Cloudflare Access edge credentials, newer native-device settings bridges, embedded chat/dashboard, installer/updater and ARM64 packaging. |
+| Setup and app bridges | One-paste join-code onboarding, Cloudflare Access edge credentials, newer native-device settings bridges, embedded chat/dashboard, Authenticode signing and ARM64 packaging. |
 | Desktop sharing | Existing ticketed RFB bridge still requires an authenticated loopback VNC server. AnyDesk is not an RFB server. |
 
 These features are deliberately not advertised. Mobile personal-data capabilities are not Windows parity requirements.

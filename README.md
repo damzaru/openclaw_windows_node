@@ -8,6 +8,23 @@ See [PARITY.md](PARITY.md) for this sync's compatibility findings and remaining 
 
 The Gateway source tree is a reference only. This repository does not modify it.
 
+## Install or update on Windows x64
+
+Download **OpenClawCompanion-Setup.exe** from this repository's [latest GitHub release](../../releases/latest). Run it as the Windows user who will use the companion, then open **OpenClaw Companion** from Start if the tray has not already opened. The installer includes .NET and the pinned browser helper; installing from a release does not require Git, an SDK, SSH, Python, or a repository token.
+
+When moving from a source build, exit its tray first and keep the old directory until you have verified the new copy. Use the same Windows account to retain settings and device credentials. If **Start with Windows** was enabled, save Settings from the installed copy to repoint that startup entry. Replace any separately configured old shortcut or scheduled launch; do not run both copies.
+
+Choose **Check for updates...** from the installed tray. After the download is verified, choose **Yes** to restart and briefly disconnect, or **No** to keep working. Background checks can stage updates but do not restart the app. **Copy Diagnostics → windowsPackage** identifies the installed package without adding another version to the tray. A source build reports `source` and uses the [checkout updater](scripts/README.md).
+
+Each release includes Sigstore signatures for Setup and the update feed; these are not Windows Authenticode signatures. For initial installation, obtain Setup only from this repository's release page and verify its provenance before running it. With Cosign installed, download the matching `OpenClawCompanion-Setup.exe.sigstore.json` and run this in the download folder (substitute the public repository URL, without a trailing slash):
+
+```powershell
+$repo = 'https://github.com/OWNER/REPOSITORY'
+cosign verify-blob --bundle OpenClawCompanion-Setup.exe.sigstore.json --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity "$repo/.github/workflows/windows-release.yml@refs/heads/main" OpenClawCompanion-Setup.exe
+```
+
+Subsequent tray updates verify the signed feed against that release workflow and check the downloaded full package's size and SHA-256 before applying it. A failed verification leaves the running version in place.
+
 ## Current functionality
 
 - Protocol 3–4 node WebSocket sessions with signed device-auth v3 payloads, plus protocol-v4 operator sidecars
@@ -200,7 +217,7 @@ This companion supports the listed contracts, not every optional capability of t
 | Computer control | Gateway-native window/accessibility-tree/background targets and richer observation/actions. Only foreground screen-based v2 actions are currently implemented; same-user IPC window helpers are not a replacement Gateway contract. |
 | Execution approvals | Interactive local prompt/approval queue, portable approval snapshots/file pinning, and `system.run.execution-context.v1` routing hints. Batch native policy execution works, but `prompt` remains fail-closed. |
 | Desktop sharing | The RFB bridge is implemented; a VNC server is not bundled. AnyDesk is not a compatible noVNC/RFB backend. |
-| App integration | Embedded Gateway chat/dashboard and the newer native-device-settings/browser web bridges, local Gateway lifecycle/setup, signed installer/updater and ARM64 packaging are not supplied by this x64 tray app. |
+| App integration | Embedded Gateway chat/dashboard and the newer native-device-settings/browser web bridges, local Gateway lifecycle/setup, Authenticode signing and ARM64 packaging are not supplied by this x64 tray app. |
 
 Personal-data/mobile commands (contacts, calendar, SMS, photos, health, motion, mobile Accessibility Control) are platform-specific optional capabilities, not requirements for a Windows file-transfer node. The platform allowlist in the Gateway is a ceiling, not proof that another app actually implements those commands.
 
@@ -224,7 +241,7 @@ Same-user compatibility clients read `%LOCALAPPDATA%\OpenClaw Companion\ipc-cred
 
 ## Build and test
 
-To update the installed companion, run `.\scripts\update-companion.ps1` from PowerShell. It fast-forwards `main`, rebuilds in the existing Release folder and starts the tray app. See [Companion maintenance](scripts/README.md) for prerequisites and failure handling.
+For a companion launched **from a checkout**, run `.\scripts\update-companion.ps1` from PowerShell. It fast-forwards `main`, rebuilds in the existing Release folder and starts the tray app. See [Companion maintenance](scripts/README.md) for prerequisites and failure handling. An installed release updates from its tray.
 
 Restore and run the full test suite:
 
@@ -280,4 +297,4 @@ Windows starts in tray mode by default. Use `--no-tray` for a headless process o
 - Camera clips use `ffmpeg` DirectShow. Requests with `includeAudio: true` capture the first available DirectShow microphone and fail clearly when no microphone is available.
 - Talk transcription uses Windows `System.Speech`; recognition quality and language availability depend on installed Windows speech components.
 - Native Windows desktop input has an opt-in disposable-window smoke test (capture, primary click with swapped buttons, Ctrl+A, Unicode typing and replacement). Real-browser acceptance of the bundled DevTools actions remains separate. Desktop streaming has a real TCP/WebSocket handshake regression test, but this sync does not install or provision a VNC server.
-- ARM64 packaging, WSL provisioning, a full Command Center/chat UI, in-app automatic updates, and local MCP/Claude runtimes are not included.
+- ARM64 packaging, WSL provisioning, a full Command Center/chat UI, unattended restarts, and local MCP/Claude runtimes are not included.
