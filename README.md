@@ -1,6 +1,6 @@
 # OpenClaw Windows Companion
 
-A Windows tray companion for the OpenClaw Gateway. App version `2026.11.8` matches the installed Gateway and negotiates node protocol versions 3 through 4. The read-only reference checkout inspected on **2026-11-24** is master `92d4728c1f9be71cd96918619d3777368bbda257` (package `2026.11.8`).
+A Windows tray companion for the OpenClaw Gateway. App version `2026.11.8` targets Gateway `2026.11.8` and negotiates node protocol versions 3 through 4. The read-only reference checkout inspected on **2026-11-24** is master `92d4728c1f9be71cd96918619d3777368bbda257` (package `2026.11.8`).
 
 The app, connection, device information, tray and Windows product metadata use one Gateway version: `Version: 2026.11.8`. On a Gateway sync, update the version, source package version, exact commit and sync date in `src/OpenClaw.Node/Version.props`. A normal rebuild uses those committed values unchanged; build details stay in diagnostics and logs.
 
@@ -224,7 +224,7 @@ Same-user compatibility clients read `%LOCALAPPDATA%\OpenClaw Companion\ipc-cred
 
 ## Build and test
 
-To update the installed companion, run `.\scripts\update-companion.ps1` from PowerShell. It fast-forwards `main`, rebuilds in the existing Release folder and starts the tray app. See [Companion maintenance](scripts/README.md) for prerequisites, failure handling.
+To update the installed companion, run `.\scripts\update-companion.ps1` from PowerShell. It fast-forwards `main`, rebuilds in the existing Release folder and starts the tray app. See [Companion maintenance](scripts/README.md) for prerequisites and failure handling.
 
 Restore and run the full test suite:
 

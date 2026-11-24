@@ -19,4 +19,3 @@ src\OpenClaw.Node\bin\x64\Release\net8.0-windows\OpenClaw.Node.exe
 Shortcuts stay valid. A missing or outdated bundled `node.exe` is restored at build time from nodejs.org and SHA-256 checked against the repository pin. If the update fails before the build, the updater tries to restart the previously running app. If the build fails, it does **not** start a possibly partial Release; fix the error and rerun. Application logs are under `%LOCALAPPDATA%\OpenClaw Companion\logs`.
 
 You don't need a watchdog. Use **Settings → Start with Windows** for sign-in startup. If another PC still uses the old scheduled task, disable and stop **OpenClawNodeWatchdog** there once, before updating. The updater does not change scheduled tasks or Windows startup settings.
-

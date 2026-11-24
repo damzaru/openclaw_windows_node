@@ -7,9 +7,9 @@ Current reference: Gateway **2026.11.8**, master `92d4728c1f9be71cd96918619d3777
 
 ## 2026-11-17: Profile/cache and version follow-up
 
-- App/product/Gateway-client version is plain **2026.11.5**, matching the installed Gateway, with a single `Version: 2026.11.5` tray row. Reference source provenance and internal build details are diagnostics-only. The reference checkout still declares 2026.11.4; no newer commit is claimed or substituted.
+- App/product/Gateway-client version is plain **2026.11.5**, with a single `Version: 2026.11.5` tray row. Reference source provenance and internal build details are diagnostics-only. The reference checkout still declares 2026.11.4; no newer commit is claimed or substituted.
 - Browser profiles now live under `%LOCALAPPDATA%\OpenClaw Companion\browser\managed-profile`, outside executable/build payloads. Migration is offline, atomic on the same volume and refuses nonempty destination conflicts or unrecognized source directories.
-- Profile migration verified that persistent data and extensions survived cache maintenance.
+- Migration verification checked that persistent profile files and extensions survived relocation and cache maintenance.
 - Configurable 128/64 MiB disk/code cache defaults, a Chrome disk-cache target and offline startup/minutely maintenance prevent unchecked cache growth between browser sessions. GPU/shader containers have a 32 MiB offline limit. Clear Browser Cache is a confirmation-protected tray action restricted to known cache directories. Active/unknown browser ownership and linked filesystem entries fail closed; persistent storage is not part of cache deletion.
 - Native settings-layout/permission tests: **10 passed**, including scrolling/action visibility at multiple sizes/scales. Release rebuild remains in the original shortcut target folder with zero warnings/errors.
 - Final non-live suite: **316 passed**, including the opt-in isolated real-browser acceptance and the exact read-only checkout's generated validators. Live Gateway accepted the rebuilt app as `2026.11.5` on both node and operator connections. Gateway source/configuration and Windows mouse settings were not changed.
@@ -31,7 +31,7 @@ Other optional gaps listed below remain; this update does not claim full Playwri
 
 - **304 tests passed**, including the opt-in real-browser runtime/upload acceptance and current Gateway validator reference check. Tests requiring a separate live-Gateway fixture were excluded. New tests cover closed-browser success, preserved HTTP errors/cancellation, one-use concurrent startup-tab reuse and preservation of user tabs.
 - The x64 Windows Release build completed with **zero warnings and errors** in the original `src/OpenClaw.Node/bin/x64/Release/net8.0-windows/` folder. Windows product metadata and `--version` report `2026.11.4` with the exact reference commit/date; the follow-up lifecycle fix is companion revision **1** (`FileVersion 2026.11.4.1`).
-- Restarted that Release executable and confirmed that the Gateway reports the test node connected as `2026.11.4`; both node and operator-sidecar connections were accepted on protocol 4.
+- Both node and operator-sidecar connections were accepted on protocol 4 after restart.
 - Live Gateway browser proxy checks with the browser closed returned `running: false`, success for repeated legacy close requests, and `missing` for owned close. The managed Chrome process count stayed at zero and no MCP helper was launched.
 - Gateway source remains clean at the reference commit. Gateway configuration, user browser profiles and Windows mouse settings were not changed.
 
@@ -77,5 +77,5 @@ These features are deliberately not advertised. Mobile personal-data capabilitie
 - Disposable native Windows acceptance exercises capture → logical primary click → Ctrl+A → Unicode text entry/replacement with Windows mouse buttons swapped. Input aborts if another application owns foreground focus.
 - Release build is kept at `src/OpenClaw.Node/bin/x64/Release/net8.0-windows/` to preserve shortcuts.
 - Final non-live suite: **276 passed**, including the opt-in current-Gateway validator check; native disposable-window acceptance: **1 passed**. Release build: zero warnings/errors.
-- Live Gateway accepted both node and operator-sidecar connections on protocol 4, reports the test node as version `2026.10.9` with `screenshot` advertised, and completed an actual `screen.snapshot` plus `__close_execution` round trip. No Gateway source or configuration was changed during this sync.
+- Live protocol-4 verification covered node and operator-sidecar connections, screenshot advertisement, and a complete `screen.snapshot` / `__close_execution` round trip.
 - Real camera/location/microphone operation, every browser route and a complete installed-VNC viewer session are not covered by that native desktop test.
