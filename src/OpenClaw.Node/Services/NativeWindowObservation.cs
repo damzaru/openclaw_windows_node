@@ -26,12 +26,18 @@ internal static class NativeWindowObservation
     {
         try
         {
-            Console.InputEncoding = Console.OutputEncoding = new UTF8Encoding(false);
-            var request = JsonSerializer.Deserialize<WindowRead>(Console.ReadLine() ?? "");
+            // WinExe runs without a console. Changing Console.InputEncoding attempts
+            // SetConsoleCP even when both handles are redirected anonymous pipes.
+            using var input = new StreamReader(Console.OpenStandardInput(), Encoding.UTF8);
+            using var output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false));
+            var request = JsonSerializer.Deserialize<WindowRead>(input.ReadLine() ?? "");
             if (request == null || request.Depth is < 0 or > 64 || request.Limit is < 1 or > 2000 || request.Query.Length > 256) return 2;
-            Console.WriteLine(JsonSerializer.Serialize(Read(request)));
+            output.WriteLine(JsonSerializer.Serialize(Read(request)));
             return 0;
         }
+        catch (JsonException) { return 3; }
+        catch (IOException) { return 4; }
+        catch (System.ComponentModel.Win32Exception) { return 5; }
         catch { return 1; }
     }
 
