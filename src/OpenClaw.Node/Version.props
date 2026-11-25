@@ -1,10 +1,10 @@
 <Project>
   <PropertyGroup>
     <!-- On a Gateway sync, record its package version, exact Git commit and sync date here. -->
-    <GatewayVersion>2026.11.8</GatewayVersion>
-    <GatewaySourceVersion>2026.11.8</GatewaySourceVersion>
-    <GatewaySourceCommit>92d4728c1f9be71cd96918619d3777368bbda257</GatewaySourceCommit>
-    <GatewaySyncDate>2026-11-24</GatewaySyncDate>
+    <GatewayVersion>2026.11.10</GatewayVersion>
+    <GatewaySourceVersion>2026.11.10</GatewaySourceVersion>
+    <GatewaySourceCommit>6ea542fd97e2876aa4c871ccc494ed5419a03c5c</GatewaySourceCommit>
+    <GatewaySyncDate>2026-11-25</GatewaySyncDate>
     <CompanionRevision>0</CompanionRevision>
     <GatewayNumericVersion>$([System.Text.RegularExpressions.Regex]::Match('$(GatewayVersion)', '^\d+\.\d+\.\d+').Value)</GatewayNumericVersion>
     <Version>$(GatewayVersion)</Version>

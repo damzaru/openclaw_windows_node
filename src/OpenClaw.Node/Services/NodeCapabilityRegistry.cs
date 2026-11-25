@@ -98,7 +98,7 @@ namespace OpenClaw.Node.Services
             "browser.proxy" or "browser.proxy.upload.v1" => settings.EnableBrowserProxy,
             "screen.record" => settings.EnableScreenRecording,
             "desktop.stream" => settings.EnableDesktopSharing,
-            "computer.act" => settings.EnableComputerControl,
+            "computer.act" => settings.EnableComputerControl || settings.EnableWindowInspection,
             "camera.snap" => settings.EnableCameraSnapshots,
             "camera.clip" => settings.EnableCameraSnapshots && settings.EnableCameraClips,
             "location.get" => settings.EnableLocation,

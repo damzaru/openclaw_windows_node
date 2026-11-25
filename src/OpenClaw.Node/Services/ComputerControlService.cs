@@ -31,21 +31,26 @@ internal sealed class ComputerControlService : IDisposable
     private readonly System.Threading.Timer _releaseWatchdog;
     private bool _disposed;
 
-    internal ComputerControlService(Func<IReadOnlyList<DisplayGeometry>>? displays = null, IComputerInput? input = null)
+    private readonly WindowObservationService? _inspection;
+    private readonly bool _inputEnabled;
+
+    internal ComputerControlService(Func<IReadOnlyList<DisplayGeometry>>? displays = null, IComputerInput? input = null, WindowObservationService? inspection = null, bool inputEnabled = true)
     {
+        _inspection = inspection;
+        _inputEnabled = inputEnabled;
         _displays = displays ?? ReadDisplays;
         _input = input ?? new WindowsComputerInput();
         _releaseWatchdog = new System.Threading.Timer(_ => _ = ReleaseExpiredMouseAsync(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
     }
 
-    internal static object Descriptor(string generation) => new
+    internal static object Descriptor(string generation, bool inspection = false, bool inputEnabled = true) => new
     {
         contractVersion = 2,
         provider = new { id = "openclaw-windows", label = "Windows native input", generation },
         // Screenshot is a provider action even though it uses screen.snapshot,
         // not computer.act. Current Gateways derive local wait support from it.
-        actions = new[] { "screenshot" }.Concat(Actions).ToArray(), targets = new[] { "screen" }, deliveryModes = new[] { "foreground" },
-        observations = new[] { "image" }, features = new { recording = false, agentCursor = false, multiDisplay = true },
+        actions = new[] { "screenshot" }.Concat(inputEnabled ? Actions : Array.Empty<string>()).Concat(inspection ? WindowObservationService.Actions : Array.Empty<string>()).ToArray(), targets = inspection ? new[] { "screen", "window" } : new[] { "screen" }, deliveryModes = new[] { "foreground" },
+        observations = inspection ? new[] { "image", "accessibility" } : new[] { "image" }, features = new { recording = false, agentCursor = false, multiDisplay = true },
     };
 
     internal static IReadOnlyList<DisplayGeometry> ReadDisplays()
@@ -85,6 +90,7 @@ internal sealed class ComputerControlService : IDisposable
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                _inspection?.Forget(inputScope);
                 if (_mouseScope == inputScope) ReleaseHeldInput();
                 lock (_frames)
                     foreach (var id in _frames.Where(pair => pair.Value.Scope == inputScope).Select(pair => pair.Key).ToArray())
@@ -93,7 +99,9 @@ internal sealed class ComputerControlService : IDisposable
             }
             finally { _gate.Release(); }
         }
-        if (!Actions.Contains(action, StringComparer.Ordinal)) throw Invalid("computer action is not supported by this provider");
+        if (_inspection != null && WindowObservationService.Actions.Contains(action))
+            return await _inspection.ReadAsync(action, root, executionId ?? throw Invalid("window inspection requires executionId"), cancellationToken);
+        if (!_inputEnabled || !Actions.Contains(action, StringComparer.Ordinal)) throw Invalid("computer action is not supported by this provider");
         if (root.TryGetProperty("deliveryMode", out var mode) && (mode.ValueKind != JsonValueKind.String || mode.GetString() != "foreground"))
             throw Invalid("this provider supports foreground delivery only");
         foreach (var field in new[] { "windowRef", "elementRef", "observationId" })
@@ -246,12 +254,13 @@ internal sealed class ComputerControlService : IDisposable
     internal async Task ResetAsync()
     {
         await _gate.WaitAsync();
-        try { ReleaseHeldInput(); lock (_frames) _frames.Clear(); }
+        try { _inspection?.Forget(null); ReleaseHeldInput(); lock (_frames) _frames.Clear(); }
         finally { _gate.Release(); }
     }
     public void Dispose()
     {
         _disposed = true;
+        _inspection?.Forget(null);
         _releaseWatchdog.Dispose();
         ReleaseHeldInput();
         // Reset/watchdog callbacks can already be queued. Keep their semaphore alive.

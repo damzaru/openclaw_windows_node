@@ -15,6 +15,7 @@ namespace OpenClaw.Node.Services
         public bool AllowUnrestrictedExecutionPolicy { get; set; }
         public bool EnableFileRead { get; set; }
         public bool EnableFileWrite { get; set; }
+        public bool EnableWindowInspection { get; set; }
         public bool EnableComputerControl { get; set; }
         public bool EnableDesktopSharing { get; set; }
         public int DesktopVncPort { get; set; } = 5900;

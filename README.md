@@ -1,8 +1,8 @@
 # OpenClaw Windows Companion
 
-A Windows tray companion for the OpenClaw Gateway. App version `2026.11.8` targets Gateway `2026.11.8` and negotiates node protocol versions 3 through 4. The read-only reference checkout inspected on **2026-11-24** is master `92d4728c1f9be71cd96918619d3777368bbda257` (package `2026.11.8`).
+A Windows tray companion for OpenClaw Gateway `2026.11.10` (node protocol 3 through 4). The reference is release commit `6ea542fd97e2876aa4c871ccc494ed5419a03c5c`, checked on 2026-11-25.
 
-The app, connection, device information, tray and Windows product metadata use one Gateway version: `Version: 2026.11.8`. On a Gateway sync, update the version, source package version, exact commit and sync date in `src/OpenClaw.Node/Version.props`. A normal rebuild uses those committed values unchanged; build details stay in diagnostics and logs.
+The app, connection, device information, tray and Windows product metadata use one Gateway version: `Version: 2026.11.10`. On a Gateway sync, update the version, source package version, exact commit and sync date in `src/OpenClaw.Node/Version.props`. A normal rebuild uses those committed values unchanged; build details stay in diagnostics and logs.
 
 See [PARITY.md](PARITY.md) for this sync's compatibility findings and remaining optional gaps.
 
@@ -217,6 +217,12 @@ Desktop-sharing setup on Windows:
 
 Settings actions live in a fixed footer outside the scrollable fields, and the dialog can be resized for smaller work areas.
 
+### Read-only window inspection (opt-in)
+
+In tray Settings, **Inspect windows and accessibility labels (read-only)** is separate from foreground computer control. It allows a paired Gateway to read visible window titles and controls, including windows behind another app. With this setting alone, the node will not click, type, focus windows, or invoke elements.
+
+Use `list_windows` (or unfiltered `get_accessibility_tree`) to discover windows, then `get_window_state` with a returned `windowRef`. Use `includeScreenshot: false` for labels without an image. Editable/document and password subtrees are omitted from the accessibility result; a requested window image can still show ordinary visible content. Only window-specific capture is attempted, never a desktop crop. Expired or superseded references require fresh discovery. If Windows cannot verify display protection, that window is omitted. Protected and custom-drawn applications may yield no useful tree.
+
 ## Remaining parity gaps (Gateway 2026.11.4 reference)
 
 This companion supports the listed contracts, not every optional capability of the TypeScript node host or the macOS/mobile apps. Unimplemented surfaces are deliberately not advertised.
@@ -226,7 +232,7 @@ This companion supports the listed contracts, not every optional capability of t
 | Workspace services | `workspace.memory` indexing/search and `workspace.skills` installation/provenance/update operations. Basic filesystem handlers alone do not provide a complete Gateway storage split; the current upstream workspace placement contracts also require POSIX remote roots. |
 | Plugin/agent runtimes | Generic `mcp.tools.call.v1`, dynamically registered plugin commands/tools, `agent.cli.claude.run.v1`, node-local CLI session catalogs/resume, Codex `codex.exec-server.stdio.v1`, and provider-owned interactive PTY terminals. The bundled browser MCP runtime is not a generic node MCP host. |
 | Managed workers | Private `worker.*` bundle installation, run supervision, workspace synchronization/retention, process management and managed desktop/portal ownership. These optional worker runtimes are separate from this companion's foreground desktop control. |
-| Computer control | Gateway-native window/accessibility-tree/background targets and richer observation/actions. Only foreground screen-based v2 actions are currently implemented; same-user IPC window helpers are not a replacement Gateway contract. |
+| Computer control | Window and element input, background delivery, and richer app/browser actions. The separate read-only inspection option does not grant targeted input. |
 | Execution approvals | Interactive local prompt/approval queue, portable approval snapshots/file pinning, and `system.run.execution-context.v1` routing hints. Batch native policy execution works, but `prompt` remains fail-closed. |
 | Desktop sharing | The RFB bridge is implemented; a VNC server is not bundled. AnyDesk is not a compatible noVNC/RFB backend. |
 | App integration | Embedded Gateway chat/dashboard and the newer native-device-settings/browser web bridges, local Gateway lifecycle/setup, Authenticode signing and ARM64 packaging are not supplied by this x64 tray app. |

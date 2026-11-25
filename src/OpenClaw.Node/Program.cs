@@ -16,6 +16,12 @@ namespace OpenClaw.Node
         static void Main(string[] args)
         {
 #if WINDOWS
+            if (args.SequenceEqual(new[] { "--window-observation-worker" }))
+            {
+                System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
+                Environment.ExitCode = NativeWindowObservation.Run();
+                return;
+            }
             Velopack.VelopackApp.Build().SetAutoApplyOnStartup(false).Run();
             // Screen capture and SendInput must share physical-pixel coordinates
             // across displays with different scale factors, before any HWND exists.
@@ -120,7 +126,7 @@ namespace OpenClaw.Node
                 UserAgent = Environment.OSVersion.VersionString,
                 Scopes = new List<string>(),
                 Commands = manifest.GatewayCommands.ToList(),
-                ComputerUse = settings.EnableComputerControl ? ComputerControlService.Descriptor(instanceId) : null,
+                ComputerUse = settings.EnableComputerControl || settings.EnableWindowInspection ? ComputerControlService.Descriptor(instanceId, settings.EnableWindowInspection, settings.EnableComputerControl) : null,
                 Permissions = new Dictionary<string, bool>()
             };
 

@@ -85,6 +85,7 @@ namespace OpenClaw.Node.Tray
             var codeCache = AddNumber(table, "Browser code cache (MiB)", settings.BrowserCodeCacheMiB, 16, 2048);
             AddNote(table, "Browser data: " + BrowserProfileService.Default.ProfilePath + ". Logins and extensions persist. Disk-cache target applies at browser launch; oversized disk/code/GPU caches are cleared only while the browser is closed (checked every minute). Clear Browser Cache is also available in the tray menu.");
             var canvas = AddCheck(table, "Canvas and A2UI", settings.EnableCanvas);
+            var inspect = AddCheck(table, "Inspect windows and accessibility labels (read-only)", settings.EnableWindowInspection);
             var computer = AddCheck(table, "Computer control (foreground)", settings.EnableComputerControl);
             var desktop = AddCheck(table, "Desktop sharing (loopback VNC)", settings.EnableDesktopSharing);
             var vncPort = AddNumber(table, "Loopback VNC port", settings.DesktopVncPort, 1, 65535);
@@ -152,6 +153,7 @@ namespace OpenClaw.Node.Tray
                                         (!settings.EnableScreenRecording && recording.Checked) ||
                                         (!settings.EnableLocation && location.Checked) ||
                                         (!settings.EnableTalkPushToTalk && talk.Checked);
+                enablingSensitive |= !settings.EnableWindowInspection && inspect.Checked;
                 enablingSensitive |= !settings.EnableComputerControl && computer.Checked;
                 enablingSensitive |= !settings.EnableDesktopSharing && desktop.Checked;
                 if (enablingSensitive && MessageBox.Show(
@@ -174,6 +176,7 @@ namespace OpenClaw.Node.Tray
                 settings.BrowserCodeCacheMiB = (int)codeCache.Value;
                 settings.EnableCanvas = canvas.Checked;
                 settings.EnableComputerControl = computer.Checked;
+                settings.EnableWindowInspection = inspect.Checked;
                 settings.EnableDesktopSharing = desktop.Checked;
                 settings.DesktopVncPort = (int)vncPort.Value;
                 settings.DesktopVncPassword = vncPassword.Text;

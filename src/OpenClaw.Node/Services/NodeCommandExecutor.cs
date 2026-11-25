@@ -31,7 +31,7 @@ namespace OpenClaw.Node.Services
         private readonly CanvasService _canvas;
         private readonly TalkPushToTalkService _talk;
         private readonly UploadStagingService _uploads = new();
-        private readonly ComputerControlService _computer = new();
+        private readonly ComputerControlService _computer;
         private readonly FileTransferService _fileTransfer = new();
 
         public NodeCommandExecutor(
@@ -49,6 +49,7 @@ namespace OpenClaw.Node.Services
             _settings = settings ?? new CompanionSettings();
             _notificationSink = notificationSink;
             _settings.Normalize();
+            _computer = new ComputerControlService(inspection: _settings.EnableWindowInspection ? new WindowObservationService() : null, inputEnabled: _settings.EnableComputerControl);
             _canvas = new CanvasService(
                 _screen,
                 rpc as IPluginSurfaceClient,

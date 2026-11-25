@@ -21,7 +21,10 @@ public sealed class GatewayReferenceContractTests
         var action = await service.ActAsync("""{"action":"key","keys":"Control_L+a"}""", default);
         var payload = JsonSerializer.Serialize(new
         {
-            descriptor = ComputerControlService.Descriptor("reference-check"),
+            descriptor = ComputerControlService.Descriptor("reference-check", true, false),
+            window = new { ok = true, observation = new { kind = "window", observationId = "synthetic", elements = new[] {
+                new { elementRef = "synthetic:1", role = "Button", label = "Example", bounds = new { x = 0, y = 0, width = 10, height = 10 } }
+            } }, details = new { truncated = false } },
             action,
             snapshot = new { format = "png", base64 = ScreenCaptureService.Png1x1FallbackBase64, displayFrameId = "frame", screenIndex = 0, width = 1, height = 1, capturedAtMs = 1 },
         });
@@ -39,6 +42,7 @@ public sealed class GatewayReferenceContractTests
             for (const [key, validate] of [
               ['descriptor', v.validateComputerUseCapabilityDescriptor],
               ['action', v.validateComputerActResult],
+              ['window', v.validateComputerActResult],
               ['snapshot', v.validateScreenSnapshotResult],
             ]) { if (!validate(p[key])) throw new Error(key + ' rejected by Gateway'); }
             if (!p.descriptor.actions.includes('screenshot')) throw new Error('Gateway would refuse screenshot');
